@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ableton-mcp-local"
+version = "0.1.0"
+description = "Local MCP prototype for Ableton Live 11"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.12,<2"]
+
+[project.scripts]
+ableton-mcp = "ableton_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["ableton_mcp*"]
