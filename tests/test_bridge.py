@@ -27,6 +27,7 @@ class ValidationTests(unittest.TestCase):
         self.control = bridge.AbletonMCP.__new__(bridge.AbletonMCP)
         self.control.song = lambda: self.song
         self.control._snapshots = {}
+        self.control._device_snapshots = {}
         bridge.ALLOW_WRITES = False
 
     def tearDown(self):
@@ -58,7 +59,7 @@ class ValidationTests(unittest.TestCase):
 
 class ExtendedTests(ValidationTests):
     def setUp(self):
-        super().setUp()
+        ValidationTests.setUp(self)
         self.steps = []
         self.song.begin_undo_step = lambda: self.steps.append("begin")
         self.song.end_undo_step = lambda: self.steps.append("end")
@@ -81,6 +82,8 @@ class ExtendedTests(ValidationTests):
                     panning=parameter("Pan", 0, -1, 1), sends=[]))
         self.song.return_tracks = [extra_track("Reverb")]
         self.song.master_track = extra_track("Master")
+        self.song.return_tracks[0].devices = []
+        self.song.master_track.devices = []
         self.request = dict(track=0, device=0, parameter=0, value=0.6,
             expected_track_name="Vocal", expected_device_name="EQ",
             expected_parameter_name="Gain", expected_value=0.4)
@@ -182,6 +185,199 @@ class ExtendedTests(ValidationTests):
             self.control._apply(self.song, [(self.volume, "value", 0.1), (RejectingParameter(), "value", 1)])
         self.assertEqual(self.volume.value, 0.7)
         self.assertEqual(self.steps, ["begin", "end"])
+
+
+class DeviceSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        ExtendedTests.setUp(self)
+        class LiveObject(types.SimpleNamespace):
+            def __eq__(self, other):
+                return self is other
+            def __ne__(self, other):
+                return self is not other
+        self.LiveObject = LiveObject
+        self.song = LiveObject(**vars(self.song))
+        self.track = LiveObject(**vars(self.track))
+        self.song.tracks = [self.track]
+        self.parameter = LiveObject(**vars(self.parameter))
+        self.device = LiveObject(name="EQ", parameters=[self.parameter])
+        self.track.devices = [self.device]
+
+    def tearDown(self):
+        bridge.ALLOW_WRITES = False
+
+    def snapshot(self, **params):
+        return self.control._dispatch("create_device_snapshot", params)["snapshot_id"]
+
+    def restore(self, snapshot_id):
+        return self.control._dispatch("restore_device_snapshot", dict(snapshot_id=snapshot_id))
+
+    def test_capture_restore_and_repeat_noop(self):
+        snapshot_id = self.snapshot()
+        self.parameter.value = 0.8
+        self.volume.value = 0.2
+        bridge.ALLOW_WRITES = True
+        result = self.restore(snapshot_id)
+        self.assertEqual(self.parameter.value, 0.4)
+        self.assertEqual(self.volume.value, 0.2)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["changed_parameter_count"], 1)
+        self.assertEqual(self.steps, ["begin", "end"])
+        self.assertEqual(self.restore(snapshot_id)["changed_parameter_count"], 0)
+        self.assertEqual(self.steps, ["begin", "end"])
+
+    def test_all_tracks_and_single_track_scope(self):
+        other = self.LiveObject(**vars(self.parameter))
+        other.value = 0.5
+        self.song.return_tracks[0].devices = [self.LiveObject(name="Return EQ", parameters=[other])]
+        master = self.LiveObject(**vars(self.parameter))
+        self.song.master_track.devices = [self.LiveObject(name="Limiter", parameters=[master])]
+        all_id = self.snapshot()
+        one_id = self.snapshot(track=0)
+        listing = self.control._dispatch("list_device_snapshots", {})
+        self.assertEqual(listing[0]["captured_parameter_count"], 3)
+        bridge.ALLOW_WRITES = True
+        self.parameter.value = other.value = master.value = 0.9
+        self.restore(one_id)
+        self.assertEqual(other.value, 0.9)
+        self.restore(all_id)
+        self.assertEqual(other.value, 0.5)
+        self.assertEqual(master.value, 0.4)
+
+    def test_disabled_capture_is_skipped_and_reported(self):
+        self.parameter.is_enabled = False
+        snapshot_id = self.snapshot()
+        self.parameter.is_enabled = True
+        self.parameter.value = 0.9
+        bridge.ALLOW_WRITES = True
+        result = self.restore(snapshot_id)
+        self.assertEqual(result["skipped_disabled_parameter_count"], 1)
+        self.assertEqual(self.parameter.value, 0.9)
+        self.assertEqual(self.steps, [])
+
+    def test_disabled_changed_parameter_blocks_entire_restore(self):
+        other = self.LiveObject(**vars(self.parameter))
+        self.device.parameters.append(other)
+        snapshot_id = self.snapshot()
+        self.parameter.value = other.value = 0.9
+        other.is_enabled = False
+        bridge.ALLOW_WRITES = True
+        with self.assertRaises(ValueError):
+            self.restore(snapshot_id)
+        self.assertEqual(self.parameter.value, 0.9)
+        self.assertEqual(self.steps, [])
+
+    def test_replaced_same_named_device_rejected(self):
+        snapshot_id = self.snapshot()
+        self.track.devices = [self.LiveObject(**vars(self.device))]
+        bridge.ALLOW_WRITES = True
+        with self.assertRaisesRegex(ValueError, "Device topology"):
+            self.restore(snapshot_id)
+        self.assertEqual(self.steps, [])
+
+    def test_replaced_parameter_and_changed_metadata_rejected(self):
+        snapshot_id = self.snapshot()
+        self.device.parameters = [self.LiveObject(**vars(self.parameter))]
+        bridge.ALLOW_WRITES = True
+        with self.assertRaisesRegex(ValueError, "Parameter topology"):
+            self.restore(snapshot_id)
+        self.device.parameters = [self.parameter]
+        for attr, value in [("name", "Other"), ("max", 2), ("is_quantized", True)]:
+            previous = getattr(self.parameter, attr)
+            setattr(self.parameter, attr, value)
+            with self.assertRaises(ValueError):
+                self.restore(snapshot_id)
+            setattr(self.parameter, attr, previous)
+        self.assertEqual(self.steps, [])
+
+    def test_set_and_track_changes_rejected(self):
+        snapshot_id = self.snapshot()
+        bridge.ALLOW_WRITES = True
+        original = self.song
+        self.song = self.LiveObject(**vars(original))
+        with self.assertRaises(ValueError):
+            self.restore(snapshot_id)
+        self.assertEqual(self.control._dispatch("list_device_snapshots", {}), [])
+        self.song = original
+        self.song.tracks = [self.LiveObject(**vars(self.track))]
+        with self.assertRaises(ValueError):
+            self.restore(snapshot_id)
+
+    def test_read_only_limit_deletion_and_bad_index(self):
+        snapshot_id = self.snapshot()
+        with self.assertRaises(ValueError):
+            self.restore(snapshot_id)
+        for _ in range(19):
+            self.snapshot()
+        with self.assertRaises(ValueError):
+            self.snapshot()
+        self.control._dispatch("delete_device_snapshot", dict(snapshot_id=snapshot_id))
+        self.assertEqual(len(self.control._dispatch("list_device_snapshots", {})), 19)
+        bridge.ALLOW_WRITES = True
+        with self.assertRaises(ValueError):
+            self.restore(snapshot_id)
+        with self.assertRaises(ValueError):
+            self.snapshot(track=-1)
+
+    def test_parameter_slot_limit(self):
+        self.device.parameters = [self.parameter] * 10001
+        with self.assertRaises(ValueError):
+            self.snapshot()
+        self.assertEqual(self.control._device_snapshots, {})
+
+    def test_readback_mismatch_rolls_back(self):
+        class ClampingParameter:
+            def __init__(self):
+                self._value = 0.5
+            @property
+            def value(self):
+                return self._value
+            @value.setter
+            def value(self, value):
+                self._value = min(value, 0.5)
+        parameter = ClampingParameter()
+        with self.assertRaisesRegex(RuntimeError, "original values restored"):
+            self.control._apply(self.song, [(parameter, "value", 0.9)], verify=True)
+        self.assertEqual(parameter.value, 0.5)
+        self.assertEqual(self.steps, ["begin", "end"])
+
+    def test_restore_checks_indirect_changes_to_unchanged_parameters(self):
+        other = self.LiveObject(**vars(self.parameter))
+        class CoupledParameter:
+            name, min, max, is_quantized, is_enabled = "Coupled", 0, 1, False, True
+            def __init__(self):
+                self._value = 0.4
+            @property
+            def value(self):
+                return self._value
+            @value.setter
+            def value(self, value):
+                self._value = value
+                if value == 0.4:
+                    other.value = 0.7
+        coupled = CoupledParameter()
+        self.device.parameters = [coupled, other]
+        snapshot_id = self.snapshot()
+        coupled._value = 0.9
+        bridge.ALLOW_WRITES = True
+        with self.assertRaisesRegex(RuntimeError, "readback"):
+            self.restore(snapshot_id)
+        self.assertEqual(coupled.value, 0.9)
+        self.assertEqual(other.value, 0.4)
+
+    def test_rollback_readback_failure_is_reported(self):
+        class RejectingRollback:
+            def __init__(self):
+                self._value = 0.8
+            @property
+            def value(self):
+                return self._value
+            @value.setter
+            def value(self, value):
+                self._value = min(value, 0.5)
+        parameter = RejectingRollback()
+        with self.assertRaisesRegex(RuntimeError, "rollback incomplete"):
+            self.control._apply(self.song, [(parameter, "value", 0.9)], verify=True)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,85 @@
 import os
 from mcp.server.fastmcp import FastMCP
 from .client import BridgeClient
+from .audio import analyze_file, list_exports, compare_files
+from .experiments import (MixingChange, Decision, save_experiment, read_experiment,
+                          update_experiment, list_experiments)
 
 mcp = FastMCP("Ableton Live local prototype")
+
+
+@mcp.tool()
+def list_audio_exports(folder: str | None = None) -> dict:
+    """List up to 100 WAV/AIFF/FLAC exports without recursion.
+
+    Default is this project's audio_exports folder. Otherwise provide an absolute
+    local folder path. Requires neither Ableton nor a bridge token.
+    """
+    return list_exports(folder)
+
+
+@mcp.tool()
+def analyze_audio_file(path: str) -> dict:
+    """Measure a local mono/stereo WAV/AIFF/FLAC export without modifying it.
+
+    Provide an absolute path. Reports integrated LUFS, sample peak (not true peak),
+    RMS, crest factor, full-scale samples, DC, stereo balance/correlation and
+    frequency-band energy, spectral centroid and dominant frequency.
+    Native levels are measurements, not mixing prescriptions. Max 10 minutes
+    and 128 MiB decoded float32 audio. Requires neither Live nor a bridge token.
+    """
+    return analyze_file(path)
+
+
+@mcp.tool()
+def compare_audio_files(original_path: str, revised_path: str) -> dict:
+    """Compare two local exports: levels, stereo and frequency bands, revised minus original.
+
+    Flags duration/sample-rate/channel/format mismatches. Matching metadata is
+    not proof of time alignment. Includes gain-adjusted band changes to separate
+    spectral shape from a simple gain change. Listening gain is suggested only;
+    files are neither aligned nor modified. Same limits as analyze_audio_file.
+    """
+    return compare_files(original_path, revised_path)
+
+
+@mcp.tool()
+def save_mixing_experiment(title: str, original_path: str, revised_path: str | None = None,
+                          changes: list[MixingChange] | None = None,
+                          mixer_snapshot_id: str | None = None,
+                          device_snapshot_id: str | None = None,
+                          listening_notes: str = "", decision: Decision = "pending") -> dict:
+    """Save measured audio comparison/baseline and recorded changes as JSON and Markdown.
+
+    Files go to this project's ignored mixing_reports folder. Measurements and
+    SHA-256 identities are computed now; supplied changes/notes are caller records,
+    not an automatic Live audit. Record original/proposed/applied native values.
+    Snapshot IDs are references, not persistent backups. No Live modifications.
+    Use pending/inconclusive until the user supplies a listening decision.
+    """
+    return save_experiment(title, original_path, revised_path, changes, mixer_snapshot_id,
+                           device_snapshot_id, listening_notes, decision)
+
+
+@mcp.tool()
+def list_mixing_experiments() -> dict:
+    """List up to 100 saved experiment IDs, newest updated first."""
+    return list_experiments()
+
+
+@mcp.tool()
+def read_mixing_experiment(report_id: str) -> dict:
+    """Read a saved experiment's measured results and recorded decisions."""
+    return read_experiment(report_id)
+
+
+@mcp.tool()
+def update_mixing_experiment(report_id: str, listening_notes: str, decision: Decision) -> dict:
+    """Replace listening notes and decision in a saved report; preserves measurements.
+
+    This records a user-supplied decision and does not keep or revert Live changes.
+    """
+    return update_experiment(report_id, listening_notes, decision)
 
 
 def call(method, **params):
@@ -69,6 +146,42 @@ def restore_mixer_snapshot(snapshot_id: str) -> dict:
 def delete_mixer_snapshot(snapshot_id: str) -> dict:
     """Discard a mixer snapshot to release memory; does not modify the Live set."""
     return call("delete_mixer_snapshot", snapshot_id=snapshot_id)
+
+
+@mcp.tool()
+def create_device_snapshot(track: int | None = None) -> dict:
+    """Capture enabled top-level device parameters in Live memory.
+
+    Omit track for regular/return/master devices, or pass a zero-based regular
+    track index. Rack chains, mixer settings, automation, presets and plugin
+    internals are excluded. Disabled parameters are skipped and counted. Maximum
+    20 snapshots, 10000 parameter slots each; IDs expire on bridge/Live restart.
+    """
+    return call("create_device_snapshot", track=track)
+
+
+@mcp.tool()
+def restore_device_snapshot(snapshot_id: str) -> dict:
+    """Restore a device snapshot, validating all targets before writing.
+
+    Requires writes enabled. Rejects changed sets, tracks, devices, parameters or
+    ranges. Changed parameters now disabled must be re-enabled manually first.
+    Uses one undo step with readback verification and attempted rollback on
+    failure. Automation can subsequently override restored values.
+    """
+    return call("restore_device_snapshot", snapshot_id=snapshot_id)
+
+
+@mcp.tool()
+def list_device_snapshots() -> list:
+    """List available device snapshot IDs and scope for the current Live set."""
+    return call("list_device_snapshots")
+
+
+@mcp.tool()
+def delete_device_snapshot(snapshot_id: str) -> dict:
+    """Discard a device snapshot without changing Live parameters."""
+    return call("delete_device_snapshot", snapshot_id=snapshot_id)
 
 
 def main():

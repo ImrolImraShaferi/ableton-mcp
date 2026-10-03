@@ -19,6 +19,7 @@ class AbletonMCP(ControlSurface):
         super(AbletonMCP, self).__init__(c_instance)
         self._socket = None
         self._snapshots = {}
+        self._device_snapshots = {}
         if not TOKEN:
             self.log_message("AbletonMCP disabled: configure TOKEN")
             return
@@ -66,6 +67,20 @@ class AbletonMCP(ControlSurface):
         song = self.song()
         if not isinstance(params, dict):
             raise ValueError("Expected parameter object")
+        if method == "create_device_snapshot":
+            return self._create_device_snapshot(song, params.get("track"))
+        if method == "list_device_snapshots":
+            return [dict(snapshot_id=key, **value["summary"])
+                    for key, value in self._device_snapshots.items() if value["song"] == song]
+        if method == "delete_device_snapshot":
+            snapshot_id = params.get("snapshot_id")
+            if snapshot_id not in self._device_snapshots:
+                raise ValueError("Unknown or expired device snapshot")
+            del self._device_snapshots[snapshot_id]
+            return dict(deleted=snapshot_id)
+        if method == "restore_device_snapshot":
+            self._require_writes()
+            return self._restore_device_snapshot(song, params.get("snapshot_id"))
         if method == "create_mixer_snapshot":
             return self._create_snapshot(song)
         if method == "delete_mixer_snapshot":
@@ -150,19 +165,35 @@ class AbletonMCP(ControlSurface):
             raise ValueError("Quantized parameter requires an integer native value")
 
     @staticmethod
-    def _apply(song, changes):
+    def _apply(song, changes, verify=False, verification_targets=None):
         originals = [(obj, attr, getattr(obj, attr)) for obj, attr, value in changes]
+        verification_originals = ([(obj, attr, getattr(obj, attr))
+                                  for obj, attr, value in verification_targets]
+                                 if verification_targets is not None else None)
         song.begin_undo_step()
         applied = []
         try:
             for (obj, attr, value), original in zip(changes, originals):
                 applied.append(original)
                 setattr(obj, attr, value)
+            if verify:
+                for obj, attr, value in (verification_targets if verification_targets is not None else changes):
+                    if not math.isclose(getattr(obj, attr), value, rel_tol=1e-6, abs_tol=1e-6):
+                        raise RuntimeError("Parameter readback differs from requested value")
         except Exception as exc:
             rollback_errors = []
-            for obj, attr, value in reversed(applied):
+            rollback_targets = verification_originals if verification_originals is not None else applied
+            for obj, attr, value in reversed(rollback_targets):
                 try:
+                    if math.isclose(getattr(obj, attr), value, rel_tol=1e-6, abs_tol=1e-6):
+                        continue
                     setattr(obj, attr, value)
+                except Exception as rollback_exc:
+                    rollback_errors.append(str(rollback_exc))
+            for obj, attr, value in rollback_targets:
+                try:
+                    if not math.isclose(getattr(obj, attr), value, rel_tol=1e-6, abs_tol=1e-6):
+                        rollback_errors.append("Rollback readback differs from original value")
                 except Exception as rollback_exc:
                     rollback_errors.append(str(rollback_exc))
             detail = "rollback incomplete; inspect current state" if rollback_errors else "original values restored"
@@ -217,8 +248,86 @@ class AbletonMCP(ControlSurface):
         self._apply(song, changes)
         return dict(restored=snapshot_id, track_count=len(snapshot["tracks"]))
 
+    def _create_device_snapshot(self, song, track_index):
+        if len(self._device_snapshots) >= 20:
+            raise ValueError("Device snapshot limit reached; delete an existing snapshot")
+        if track_index is None:
+            tracks = self._mixer_tracks(song)
+        else:
+            self._index(track_index, song.tracks, "regular track")
+            tracks = (song.tracks[track_index],)
+        entries = []
+        parameter_count = skipped = slots = device_count = 0
+        for track in tracks:
+            devices = tuple(track.devices)
+            captured = []
+            for device in devices:
+                parameters = tuple(device.parameters)
+                slots += len(parameters)
+                if slots > 10000:
+                    raise ValueError("Snapshot exceeds 10000 parameter slots; capture one track at a time")
+                values = []
+                metadata = []
+                for parameter in parameters:
+                    metadata.append((parameter.name, parameter.min, parameter.max, parameter.is_quantized))
+                    if parameter.is_enabled:
+                        self._validate_parameter(parameter, parameter.value)
+                        values.append(parameter.value)
+                        parameter_count += 1
+                    else:
+                        values.append(None)
+                        skipped += 1
+                captured.append(dict(device=device, parameters=parameters, values=tuple(values),
+                                     metadata=tuple(metadata)))
+                device_count += 1
+            entries.append(dict(track=track, devices=devices, captured=captured))
+        snapshot_id = uuid.uuid4().hex
+        summary = dict(track_names=[t.name for t in tracks], device_count=device_count,
+                       captured_parameter_count=parameter_count,
+                       skipped_disabled_parameter_count=skipped,
+                       scope="all top-level devices" if track_index is None else "regular track " + str(track_index))
+        self._device_snapshots[snapshot_id] = dict(song=song, entries=entries, summary=summary,
+            regular=tuple(song.tracks), returns=tuple(song.return_tracks), master=song.master_track)
+        return dict(snapshot_id=snapshot_id, **summary)
+
+    def _restore_device_snapshot(self, song, snapshot_id):
+        snapshot = self._device_snapshots.get(snapshot_id)
+        if snapshot is None:
+            raise ValueError("Unknown or expired device snapshot")
+        if (song != snapshot["song"] or tuple(song.tracks) != snapshot["regular"]
+                or tuple(song.return_tracks) != snapshot["returns"]
+                or song.master_track != snapshot["master"]):
+            raise ValueError("Set or track topology changed; device snapshot cannot be restored")
+        changes = []
+        verification_targets = []
+        # Validate every captured target before starting any writes or undo step.
+        for entry in snapshot["entries"]:
+            if tuple(entry["track"].devices) != entry["devices"]:
+                raise ValueError("Device topology changed; snapshot cannot be restored")
+            for captured in entry["captured"]:
+                current = tuple(captured["device"].parameters)
+                if current != captured["parameters"]:
+                    raise ValueError("Parameter topology changed; snapshot cannot be restored")
+                metadata = tuple((p.name, p.min, p.max, p.is_quantized) for p in current)
+                if metadata != captured["metadata"]:
+                    raise ValueError("Parameter names or ranges changed; snapshot cannot be restored")
+                for parameter, value in zip(current, captured["values"]):
+                    if value is None:
+                        continue
+                    verification_targets.append((parameter, "value", value))
+                    if math.isclose(parameter.value, value, rel_tol=1e-7, abs_tol=1e-7):
+                        continue
+                    self._validate_parameter(parameter, value)
+                    changes.append((parameter, "value", value))
+        if changes:
+            self._apply(song, changes, verify=True, verification_targets=verification_targets)
+        return dict(restored=snapshot_id, changed_parameter_count=len(changes),
+                    skipped_disabled_parameter_count=snapshot["summary"]["skipped_disabled_parameter_count"],
+                    verified=True)
+
     def disconnect(self):
         self._snapshots.clear()
+        self._device_snapshots.clear()
         if self._socket is not None:
             self._socket.close()
             self._socket = None
