@@ -2,6 +2,7 @@ import os
 from mcp.server.fastmcp import FastMCP
 from .client import BridgeClient
 from .audio import analyze_file, list_exports, compare_files
+from .analysis import timeline, compare_reference, compare_stems
 from .experiments import (MixingChange, Decision, save_experiment, read_experiment,
                           update_experiment, list_experiments)
 from .exports import (ObservedExportSettings, prepare_export, get_export,
@@ -71,6 +72,63 @@ def analyze_audio_file(path: str) -> dict:
     and 128 MiB decoded float32 audio. Requires neither Live nor a bridge token.
     """
     return analyze_file(path)
+
+
+@mcp.tool()
+def analyze_audio_section(path: str, start_seconds: float = 0,
+                          end_seconds: float | None = None) -> dict:
+    """Measure a selected passage in seconds from an absolute WAV/AIFF/FLAC path.
+
+    Same metrics as analyze_audio_file. Reads only selected samples; hashes the
+    whole file. Range must be within the source. No export or Live changes.
+    """
+    return analyze_file(path, start_seconds, end_seconds)
+
+
+@mcp.tool()
+def analyze_audio_timeline(path: str, start_seconds: float = 0,
+                           end_seconds: float | None = None,
+                           window_seconds: float = 3, hop_seconds: float = 3) -> dict:
+    """Timestamped loudness, spectrum, crest factor, stereo and mono checks.
+
+    Absolute export path; up to 300 windows, minimum window 0.4 seconds.
+    Momentary/short-term ungated K-weighted measurements cover final 0.4/3 seconds
+    of each window with filter resets. Partial windows retained; null unavailable.
+    Mono uses (L+R)/2. Sample peaks only; no true peaks or instrument separation.
+    """
+    return timeline(path, start_seconds, end_seconds, window_seconds, hop_seconds)
+
+
+@mcp.tool()
+def compare_audio_reference(mix_path: str, reference_path: str,
+                            mix_start_seconds: float = 0,
+                            mix_end_seconds: float | None = None,
+                            reference_start_seconds: float = 0,
+                            reference_end_seconds: float | None = None) -> dict:
+    """Compare chosen mix/reference passages, including LUFS-matched band deltas.
+
+    Absolute paths; select musically comparable passages. Suggested gain is not
+    applied. Different durations permitted; incompatible band coverage flagged.
+    No universal tonal target or mix-quality score.
+    """
+    return compare_reference(mix_path, reference_path, mix_start_seconds,
+        mix_end_seconds, reference_start_seconds, reference_end_seconds)
+
+
+@mcp.tool()
+def compare_aligned_stems(first_path: str, second_path: str,
+                          alignment_confirmed: bool = False,
+                          start_seconds: float = 0, end_seconds: float | None = None,
+                          window_seconds: float = 3, hop_seconds: float = 3) -> dict:
+    """Compare timestamped band activity of two stems with confirmed common origin.
+
+    Requires alignment_confirmed=true from known export provenance, matching
+    source durations and sample rates. No alignment/resampling performed.
+    Coactivity requires each band >=1% stem energy and >-70 dBFS; this flags
+    possible competition, not proven masking. Up to 300 windows.
+    """
+    return compare_stems(first_path, second_path, alignment_confirmed,
+        start_seconds, end_seconds, window_seconds, hop_seconds)
 
 
 @mcp.tool()

@@ -318,3 +318,61 @@ References:
 - [Live parameter semantics](https://docs.cycling74.com/legacy/max8/vignettes/live_object_model)
 - [pyloudnorm implementation](https://github.com/csteinmetz1/pyloudnorm)
 - [SciPy Welch PSD documentation](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.welch.html)
+
+## Section, timeline, reference and stem analysis
+
+These read-only tools use the existing dependencies. No Essentia, WSL, Youlean
+integration or Remote Script update is required. Restart the MCP client to load
+the new tools from the editable installation.
+
+- `analyze_audio_section(path, start_seconds, end_seconds)`: the existing level,
+  stereo and frequency measurements for a selected passage. Times are seconds
+  from the beginning of the file; omitted end means the source end. The returned
+  range records sample-rounded boundaries and the full source duration.
+- `analyze_audio_timeline(path, start_seconds, end_seconds, window_seconds=3,
+  hop_seconds=3)`: timestamped RMS, sample peak, channel crest factors, gated
+  integrated LUFS per window, ungated momentary/short-term loudness, band energy,
+  centroid, dominant frequency, up to eight spectral peaks, stereo correlation,
+  and mono level/band deltas. Overlapping windows are supported. Partial final
+  windows are included and marked. Window minimum is 0.4 seconds, maximum output
+  is 300 windows; use a larger hop or shorter passage for longer exports.
+- `compare_audio_reference(mix_path, reference_path, mix_start_seconds,
+  mix_end_seconds, reference_start_seconds, reference_end_seconds)`: compare
+  musically similar passages, which may have different durations. Returns raw
+  mix-minus-reference band differences and differences after suggested LUFS
+  matching. The suggested mix gain is reference LUFS minus mix LUFS. No gain is
+  actually applied. Incompatible band coverage is flagged and unavailable values
+  are null.
+- `compare_aligned_stems(first_path, second_path, alignment_confirmed=true,
+  start_seconds, end_seconds, window_seconds=3, hop_seconds=3)`: requires stems
+  exported from a known common timeline origin with identical source durations
+  and sample rates. Stereo and mono stems may be compared. Returns timestamped
+  band levels and first-minus-second differences. Simultaneous activity requires
+  both band shares >=1% and both band levels >-70 dBFS. These descriptive thresholds
+  screen out weak FFT leakage; they are not a psychoacoustic masking model.
+
+All paths must be absolute WAV/AIFF/FLAC paths. The selected decoded range is
+limited to 10 minutes and 128 MiB per file; the whole file is still hashed.
+Momentary and short-term loudness use ungated K-weighted energy over the final
+0.4 and 3 seconds of each window; filter state resets per window, so these are
+approximate local measurements rather than a continuous certified meter.
+Short windows have no short-term result. Mono checks use (L+R)/2 compared with
+average stereo channel power; complete cancellation has a separate boolean
+because logarithmic silence is null. Spectral peaks use Welch bins and their
+levels are relative PSD peaks, not calibrated sinusoid amplitudes.
+
+Example requests:
+
+> Analyze seconds 30 through 60 of my mix, with three-second windows and a
+> one-second hop. Report level changes and sections with mono cancellation.
+
+> Compare the chorus at seconds 45–65 of my mix against seconds 60–80 of my
+> reference. Separate loudness differences from tonal differences.
+
+> These kick and bass stems were exported from the same start and end with
+> normalization off. Compare their aligned band activity and give timestamps
+> for possible competition.
+
+No audio is rendered, played, normalized, resampled or modified. The tools do
+not identify instruments within a mix, measure true peaks, prove audible
+masking, or decide artistic quality. Automated rendering remains separate.

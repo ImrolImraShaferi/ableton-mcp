@@ -80,7 +80,7 @@ def list_exports(folder=None):
                 truncated=len(paths) > 100)
 
 
-def analyze_file(path):
+def analyze_file(path, start_seconds=0, end_seconds=None, processor=None):
     source = Path(path)
     if not source.is_absolute() or not source.is_file():
         raise ValueError("Provide an absolute path to an existing audio file")
@@ -93,7 +93,7 @@ def analyze_file(path):
         for chunk in iter(lambda: raw.read(1024 * 1024), b""):
             digest.update(chunk)
         raw.seek(0)
-        result = _analyze_open_file(source, raw)
+        result = _analyze_open_file(source, raw, start_seconds, end_seconds, processor)
         after = os.fstat(raw.fileno())
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise ValueError("Audio changed during analysis; retry after export finishes")
@@ -102,7 +102,7 @@ def analyze_file(path):
         return result
 
 
-def _analyze_open_file(source, raw):
+def _analyze_open_file(source, raw, start_seconds=0, end_seconds=None, processor=None):
     with sf.SoundFile(raw) as audio:
         if audio.format not in {"WAV", "WAVEX", "RF64", "AIFF", "FLAC"}:
             raise ValueError("Unsupported audio container")
@@ -110,13 +110,35 @@ def _analyze_open_file(source, raw):
             raise ValueError("Only mono and stereo exports are supported")
         if not 8000 <= audio.samplerate <= 192000:
             raise ValueError("Supported sample rates: 8000..192000 Hz")
-        duration = audio.frames / audio.samplerate
+        source_duration = audio.frames / audio.samplerate
+        end_seconds = source_duration if end_seconds is None else end_seconds
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+               for v in (start_seconds, end_seconds)):
+            raise ValueError("Range times must be finite numbers")
+        if not 0 <= start_seconds < end_seconds <= source_duration:
+            raise ValueError("Range must satisfy 0 <= start < end <= file duration")
+        first, last = round(start_seconds * audio.samplerate), round(end_seconds * audio.samplerate)
+        if last <= first:
+            raise ValueError("Range must contain at least one sample")
+        duration = (last - first) / audio.samplerate
         if audio.frames == 0:
             raise ValueError("Audio file is empty")
-        if duration > MAX_DURATION or audio.frames * audio.channels * 4 > MAX_DECODED_BYTES:
+        if duration > MAX_DURATION or (last - first) * audio.channels * 4 > MAX_DECODED_BYTES:
             raise ValueError("Export exceeds 10 minutes or 128 MiB decoded float32 audio; export a shorter section")
         rate, channels, subtype, container = audio.samplerate, audio.channels, audio.subtype, audio.format
-        data = audio.read(dtype="float32", always_2d=True)
+        audio.seek(first)
+        data = audio.read(last - first, dtype="float32", always_2d=True)
+    if not np.isfinite(data).all():
+        raise ValueError("Audio contains NaN or infinite samples")
+    result = (processor(data, rate, channels, subtype, container, source, first / rate)
+              if processor else analyze_samples(data, rate, channels, subtype, container, source))
+    result["range"] = dict(start_seconds=first / rate, end_seconds=last / rate,
+                           source_duration_seconds=source_duration)
+    return result
+
+
+def analyze_samples(data, rate, channels, subtype, container, source):
+    duration = len(data) / rate
     if not np.isfinite(data).all():
         raise ValueError("Audio contains NaN or infinite samples")
     notices = []

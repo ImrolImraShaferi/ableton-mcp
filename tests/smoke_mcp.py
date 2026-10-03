@@ -27,7 +27,8 @@ async def main():
                 "delete_device_snapshot", "compare_audio_files", "save_mixing_experiment",
                 "list_mixing_experiments", "read_mixing_experiment", "update_mixing_experiment",
                 "prepare_master_export", "get_master_export", "list_master_exports", "finish_master_export",
-                "browse_audio_effects", "load_audio_effect", "get_device_load"}
+                "browse_audio_effects", "load_audio_effect", "get_device_load",
+                "analyze_audio_section", "analyze_audio_timeline", "compare_audio_reference", "compare_aligned_stems"}
             result = await session.call_tool("get_project", {})
             assert result.isError, "Missing bridge token must produce an MCP tool error"
             with tempfile.TemporaryDirectory() as directory:
@@ -43,6 +44,13 @@ async def main():
                 payload = result.structuredContent or json.loads(result.content[0].text)
                 assert payload["export_metadata_match"]
                 assert payload["original"]["frequency_analysis"]["available"]
+                for name, arguments in [
+                    ("analyze_audio_section", {"path": str(path), "end_seconds": .5}),
+                    ("analyze_audio_timeline", {"path": str(path)}),
+                    ("compare_audio_reference", {"mix_path": str(path), "reference_path": str(path)}),
+                    ("compare_aligned_stems", {"first_path": str(path), "second_path": str(path), "alignment_confirmed": True})]:
+                    result = await session.call_tool(name, arguments)
+                    assert not result.isError, (name, result)
     print("MCP handshake, tool discovery, missing-token error, and audio analysis passed")
 
 
