@@ -45,12 +45,25 @@ $env:ABLETON_MCP_TOKEN = Get-Content -Raw build/token.txt
 - `get_project`: tempo, playing state, regular track names, volume, pan, mute, solo.
 - `get_devices(track)`: top-level devices and parameters; zero-based regular tracks.
 - `set_mixer(track, volume, pan)`: native volume 0..1 (not dB), pan -1..1.
+- `set_device_parameter`: change a top-level parameter using its native range,
+  current track/device/parameter names and current value from fresh inspection.
+  Disabled parameters and fractional enum/boolean values are rejected. Names
+  and values reduce stale-target mistakes but do not uniquely identify devices
+  with identical names. Re-inspect after structural changes.
+- `create_mixer_snapshot`: returns an ID for an in-memory snapshot of regular,
+  return and master mixer settings: volume, pan, sends, mute and solo where
+  available. Maximum 20; snapshots expire when Live/bridge restarts.
+- `restore_mixer_snapshot(snapshot_id)`: validate the set, track order, mixer
+  objects and sends before restoring in one undo step. Device settings,
+  automation, clips and routing are excluded. Automation can override values.
+- `delete_mixer_snapshot(snapshot_id)`: release a saved snapshot.
 
 Writes are disabled by default. To test changes, open a disposable copy of a
 set, edit the **installed** `AbletonMCP/config.py` to set `ALLOW_WRITES = True`,
-and restart Live. Each mixer command creates an undo step. Re-read tracks before
-writing because indices can change. An undo step is not an atomic transaction:
-if Live rejects a later assignment, an earlier assignment can remain changed.
+and restart Live. Each write command creates an undo step. Re-read tracks before
+writing because indices can change. On assignment failure, the bridge attempts
+to restore original values and reports whether rollback completed. Live undo
+and rollback are not guarantees of an atomic transaction; inspect after errors.
 
 The bridge binds only to 127.0.0.1:17891 and checks a random shared secret. Live
 objects are accessed only from scheduled control-surface callbacks. Requests
@@ -59,8 +72,8 @@ the current state before trying again because it may already have happened.
 
 This version does not listen to or analyze audio, traverse rack chains, insert
 devices, export audio, save sets, or perform automatic mixing/mastering. Next
-milestones: verify Live connectivity, add tested device parameter writes and
-state snapshots, then analyze manually exported audio for level/loudness and
+milestones: verify device writes and snapshot restoration in Live, then
+analyze manually exported audio for level/loudness and
 mix decisions. Rendering and mastering need a separately verified workflow.
 
 ## Validation
@@ -77,6 +90,28 @@ If the control surface fails to load, inspect Live's Log.txt for AbletonMCP
 errors. A port conflict usually means multiple selected bridge slots or Live
 instances.
 
+## Updating an already installed bridge
+
+Close Live. Run the following using your actual installed bridge folder:
+
+```powershell
+python scripts/update_bridge.py "C:\path\to\User Library\Remote Scripts\AbletonMCP"
+```
+
+This copies bridge code and preserves the existing token and `ALLOW_WRITES`
+setting. The MCP server uses an editable installation, so restart its client to
+load the new tools. Restart Live too. Do not regenerate the token for an update.
+
+Try on a copy of a set:
+
+1. Inspect a device, record a parameter's native value, change it slightly with
+   `set_device_parameter`, read it back, then restore the recorded value.
+2. Create a mixer snapshot and keep its ID. Change a track's volume and pan,
+   restore the snapshot, then read the mixer settings back to verify restoration.
+3. Delete the snapshot when finished. Mixer snapshots do not restore device
+   parameters; restore those separately using the recorded original values.
+
 References:
 - [Ableton remote script installation](https://help.ableton.com/hc/en-us/articles/209072009-Installing-third-party-remote-scripts)
 - [MCP Python SDK v1](https://py.sdk.modelcontextprotocol.io/v1/)
+- [Live parameter semantics](https://docs.cycling74.com/legacy/max8/vignettes/live_object_model)

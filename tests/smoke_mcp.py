@@ -11,7 +11,9 @@ async def main():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert {t.name for t in tools.tools} == {"get_project", "get_devices", "set_mixer"}
+            assert {t.name for t in tools.tools} == {"get_project", "get_devices", "set_mixer",
+                "set_device_parameter", "create_mixer_snapshot", "restore_mixer_snapshot",
+                "delete_mixer_snapshot"}
             result = await session.call_tool("get_project", {})
             assert result.isError, "Missing bridge token must produce an MCP tool error"
     print("MCP handshake, tool discovery, and missing-token error passed")
