@@ -20,6 +20,8 @@ class AbletonMCP(ControlSurface):
         self._socket = None
         self._snapshots = {}
         self._device_snapshots = {}
+        self._browser_items = {}
+        self._device_loads = {}
         if not TOKEN:
             self.log_message("AbletonMCP disabled: configure TOKEN")
             return
@@ -67,6 +69,16 @@ class AbletonMCP(ControlSurface):
         song = self.song()
         if not isinstance(params, dict):
             raise ValueError("Expected parameter object")
+        if method == "browse_audio_effects":
+            return self._browse_audio_effects(params)
+        if method == "load_audio_effect":
+            self._require_writes()
+            return self._load_audio_effect(song, params)
+        if method == "get_device_load":
+            job = self._device_loads.get(params.get("load_id"))
+            if job is None:
+                raise ValueError("Unknown or expired device load")
+            return dict(job)
         if method == "create_device_snapshot":
             return self._create_device_snapshot(song, params.get("track"))
         if method == "list_device_snapshots":
@@ -149,6 +161,98 @@ class AbletonMCP(ControlSurface):
     def _require_writes():
         if not ALLOW_WRITES:
             raise ValueError("Bridge is read-only; enable ALLOW_WRITES and restart Live")
+
+    def _browse_audio_effects(self, params):
+        # Session handles retain the actual BrowserItem, avoiding guessed names/URIs.
+        parent_id = params.get("parent_id")
+        if parent_id is None:
+            parent = self.application().browser.audio_effects
+        else:
+            parent = self._browser_items.get(parent_id)
+            if parent is None:
+                raise ValueError("Unknown or expired browser item; browse again")
+        offset = params.get("offset", 0)
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Offset must be a nonnegative integer")
+        children = tuple(parent.children)
+        if offset > len(children):
+            raise ValueError("Offset exceeds child count")
+        if len(self._browser_items) + min(50, len(children) - offset) > 2000:
+            raise ValueError("Browser handle limit reached; restart the bridge")
+        items = []
+        for item in children[offset:offset + 50]:
+            item_id = uuid.uuid4().hex
+            self._browser_items[item_id] = item
+            items.append(dict(item_id=item_id, name=item.name,
+                              loadable=bool(item.is_loadable), folder=bool(item.is_folder)))
+        return dict(items=items, total=len(children),
+                    next_offset=offset + 50 if offset + 50 < len(children) else None)
+
+    def _load_audio_effect(self, song, params):
+        import Live
+        index = self._index(params.get("track"), song.tracks, "regular track")
+        track = song.tracks[index]
+        devices = tuple(track.devices)
+        if (params.get("expected_track_name") != track.name or
+                params.get("expected_device_names") != [d.name for d in devices]):
+            raise ValueError("Target changed; inspect tracks and devices again")
+        item = self._browser_items.get(params.get("item_id"))
+        if item is None or not item.is_loadable:
+            raise ValueError("Unknown, expired or non-loadable browser item")
+        if params.get("expected_item_name") != item.name:
+            raise ValueError("Browser item changed; browse again")
+        if any(job["status"] == "pending" for job in self._device_loads.values()):
+            raise ValueError("A device load is pending; check its status before loading again")
+        if len(self._device_loads) >= 100:
+            raise ValueError("Device load limit reached; restart the bridge")
+        browser = self.application().browser
+        if browser.hotswap_target is not None:
+            raise ValueError("Exit Live hot-swap mode before adding a device")
+        # Live 11 exposes selected_right/default, not an "end" enum member.
+        # Select the last top-level device explicitly, then insert to its right.
+        mode = (Live.Track.DeviceInsertMode.selected_right if devices
+                else Live.Track.DeviceInsertMode.default)
+        old_mode = track.view.device_insert_mode
+        old_track = song.view.selected_track
+        old_device = track.view.selected_device
+        load_id = uuid.uuid4().hex
+        job = dict(load_id=load_id, status="pending", track=index,
+                   track_name=track.name, browser_item_name=item.name, verified=False)
+        self._device_loads[load_id] = job
+        song.begin_undo_step()
+        try:
+            song.view.selected_track = track
+            if devices:
+                song.view.select_device(devices[-1])
+            track.view.device_insert_mode = mode
+            browser.load_item(item)
+        except Exception as exc:
+            job.update(status="failed", error=str(exc) + "; inspect Live before retrying")
+        finally:
+            try:
+                track.view.device_insert_mode = old_mode
+                if old_device is not None:
+                    song.view.select_device(old_device)
+                song.view.selected_track = old_track
+            finally:
+                song.end_undo_step()
+        if job["status"] == "pending":
+            self.schedule_message(2, lambda: self._verify_device_load(load_id, song, track, devices))
+        return dict(job)
+
+    def _verify_device_load(self, load_id, song, track, before):
+        job = self._device_loads[load_id]
+        try:
+            current = tuple(track.devices)
+            if (self.song() != song or track not in song.tracks or
+                    len(current) != len(before) + 1 or current[:-1] != before):
+                raise ValueError("Expected one appended device with the original chain intact")
+            device = current[-1]
+            job.update(status="completed", verified=True, device=len(before),
+                       device_name=device.name, class_name=device.class_name)
+        except Exception as exc:
+            job.update(status="unverified", error=str(exc) +
+                       "; inspect Live and use Undo if needed; do not automatically retry")
 
     @staticmethod
     def _index(index, items, label):
@@ -326,6 +430,8 @@ class AbletonMCP(ControlSurface):
                     verified=True)
 
     def disconnect(self):
+        self._browser_items.clear()
+        self._device_loads.clear()
         self._snapshots.clear()
         self._device_snapshots.clear()
         if self._socket is not None:

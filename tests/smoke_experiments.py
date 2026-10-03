@@ -23,10 +23,12 @@ async def main():
         tone = 0.5 * np.sin(2 * np.pi * 1000 * np.arange(48000) / 48000)
         sf.write(original, tone, 48000, subtype="FLOAT")
         sf.write(revised, tone / 2, 48000, subtype="FLOAT")
-        runner = ("import sys; from pathlib import Path; from ableton_mcp import experiments; "
-                  "experiments.REPORTS = Path(sys.argv[1]); from ableton_mcp.server import main; main()")
+        runner = ("import sys; from pathlib import Path; from ableton_mcp import experiments, exports; "
+                  "experiments.REPORTS = Path(sys.argv[1]); "
+                  "exports.JOBS = Path(sys.argv[2]); exports.DEFAULT_EXPORTS = Path(sys.argv[3]); "
+                  "from ableton_mcp.server import main; main()")
         params = StdioServerParameters(command=sys.executable,
-            args=["-c", runner, str(root / "reports")], cwd=directory,
+            args=["-c", runner, str(root / "reports"), str(root / "jobs"), str(root / "exports")], cwd=directory,
             env={"ABLETON_MCP_TOKEN": ""})
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -47,7 +49,16 @@ async def main():
                 assert before["comparison"] == after["comparison"]
                 assert after["decision"] == "kept"
                 assert after["changes"][0]["original_value"] == 0.4
-    print("MCP report save, list, read and update passed; measurements preserved")
+                job = payload(await session.call_tool("prepare_master_export", {
+                    "render_start": "1.1.1", "render_length": "1.0.0",
+                    "expected_duration_seconds": 1.0, "label": "Synthetic verification test, not a Live render"}))
+                assert job["status"] == "awaiting_ui_export"
+                sf.write(job["output_path"], np.column_stack((tone, tone)), 48000, subtype="PCM_24")
+                result = payload(await session.call_tool("finish_master_export", {
+                    "job_id": job["job_id"], "observed_settings": job["requested_settings"],
+                    "render_complete_observed": True}))
+                assert result["status"] == "verified"
+    print("MCP report tools and synthetic export-job verification passed; no Live UI rendering tested")
 
 
 asyncio.run(main())

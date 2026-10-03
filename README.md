@@ -82,6 +82,11 @@ $env:ABLETON_MCP_TOKEN = Get-Content -Raw build/token.txt
 - `list_mixing_experiments` / `read_mixing_experiment`: find and reopen saved reports.
 - `update_mixing_experiment`: update listening notes and decision without
   re-analyzing audio or changing the saved measurements or Live set.
+- `prepare_master_export`: create a unique WAV destination and requested export
+  settings. **Does not start rendering**; a desktop agent must operate Live's UI.
+- `get_master_export` / `list_master_exports`: retrieve pending or verified jobs.
+- `finish_master_export`: validate recorded UI settings and an already rendered
+  WAV, then analyze it. Does not operate or finish the export dialog itself.
 
 Writes are disabled by default. To test changes, open a disposable copy of a
 set, edit the **installed** `AbletonMCP/config.py` to set `ALLOW_WRITES = True`,
@@ -99,6 +104,36 @@ This version does not listen to live audio, traverse rack chains, insert
 devices, export audio, save sets, or perform automatic mixing/mastering.
 Use manually exported audio measurements to inform mix decisions. Rendering
 and mastering need a separately verified workflow.
+
+## Agent-operated exports (UI rendering unverified)
+
+The preparation and file-validation tools are implemented. Actual Live UI export
+testing is blocked on this host because the computer-use Node REPL fails at
+Windows sandbox startup (`helper_unknown_error: setup refresh had errors`), even
+after a reset. There is no automatic dialog driver inside this MCP server.
+
+When computer use is working, an agent can follow
+[the export workflow](docs/agent-export-workflow.md): prepare a job, observe and
+operate Live's normal Export Audio/Video dialog, save to its unique path, observe
+render completion, then call `finish_master_export`. The first workflow covers
+fixed 4/4 arrangements, master stereo 24-bit WAV, supported sample rates and an
+explicit range. Normalization, MP3, loop rendering and mono conversion are off;
+dither is None. Stem export, changing tempo/meters and external hardware are
+excluded until separately tested.
+
+For example, request a master export for bars 1 through 8: start `1.1.1`, length
+`8.0.0`. The agent must inspect the dialog and record settings rather than guessing
+coordinates or replaying an unattended keyboard macro. Unique outputs go to
+`audio_exports/<job-id>/master.wav`; manifests persist in the ignored
+`export_jobs` folder. No recordings or job records are committed by default.
+
+Verification checks stability, WAV/24-bit/stereo/rate, optional known duration,
+finite decoded audio and a full analysis. Stable size is insufficient proof of
+completion because Live may preallocate files; the caller must observe Live
+finishing. Master/range/normalization are UI observations and cannot be proved
+from a WAV header. This is a prepared agent workflow, not a verified unattended
+rendering feature. No new dependencies or bridge update are needed for the job
+tools; restart the MCP client to load them.
 
 ## Analyze your recordings
 
@@ -245,6 +280,37 @@ replacing or reordering tracks/devices/parameters blocks restoration even if
 their names match; parameter names/ranges changing also blocks it. If you lose
 an ID, ask the agent to list device snapshots. Delete snapshots when finished.
 This is not a persistent backup of your Ableton set; save a set copy too.
+
+## Add audio effects to a track
+
+Automated UI exports are shelved pending working computer access. Device loading
+uses the bridge's Live browser API and does not require computer-use automation.
+This implementation needs a Live 11 test; mocked checks alone do not prove that
+Live loads devices successfully.
+
+Update the installed bridge with `scripts/update_bridge.py`, preserving config.py,
+then restart Live and the MCP client. Work on a saved copy of the set first.
+Ask the agent:
+
+> Inspect my tracks and their devices. Browse Audio Effects to find EQ Eight.
+> Append one EQ Eight to the guitar track, check the device load status, and
+> inspect its parameters. Leave its settings at their defaults.
+
+The tools are `browse_audio_effects`, `load_audio_effect`, and `get_device_load`.
+Browser folders are traversed using returned item IDs, with 50 children per page.
+Loading requires the current track name, ordered device names and browser item
+name from fresh inspection. Only regular tracks and content under Audio Effects
+are supported; no rack-chain insertion, instrument or plugin-category browsing.
+Live must be out of hot-swap mode. The effect is appended at the end of the chain.
+The bridge temporarily selects the track, restores selection, and groups the load
+into an undo step. A later scheduled check verifies exactly one device was appended
+and the old chain stayed intact. A pending status must be checked again; a failed
+or unverified load must be inspected before any retry to avoid duplicates.
+Handles and load statuses expire on bridge restart.
+
+Use Live Undo to remove a test addition. Device snapshots capture parameter values;
+they do not remove new devices, and adding a device invalidates old device snapshots.
+Capture a new snapshot after adding an effect, before changing its parameters.
 
 References:
 - [Ableton remote script installation](https://help.ableton.com/hc/en-us/articles/209072009-Installing-third-party-remote-scripts)

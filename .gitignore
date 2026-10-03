@@ -6,3 +6,4 @@ build/
 .pytest_cache/
 audio_exports/
 mixing_reports/
+export_jobs/

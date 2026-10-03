@@ -25,7 +25,9 @@ async def main():
                 "delete_mixer_snapshot", "list_audio_exports", "analyze_audio_file",
                 "create_device_snapshot", "restore_device_snapshot", "list_device_snapshots",
                 "delete_device_snapshot", "compare_audio_files", "save_mixing_experiment",
-                "list_mixing_experiments", "read_mixing_experiment", "update_mixing_experiment"}
+                "list_mixing_experiments", "read_mixing_experiment", "update_mixing_experiment",
+                "prepare_master_export", "get_master_export", "list_master_exports", "finish_master_export",
+                "browse_audio_effects", "load_audio_effect", "get_device_load"}
             result = await session.call_tool("get_project", {})
             assert result.isError, "Missing bridge token must produce an MCP tool error"
             with tempfile.TemporaryDirectory() as directory:

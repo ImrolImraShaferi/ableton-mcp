@@ -4,8 +4,50 @@ from .client import BridgeClient
 from .audio import analyze_file, list_exports, compare_files
 from .experiments import (MixingChange, Decision, save_experiment, read_experiment,
                           update_experiment, list_experiments)
+from .exports import (ObservedExportSettings, prepare_export, get_export,
+                      finish_export, list_exports_jobs)
 
 mcp = FastMCP("Ableton Live local prototype")
+
+
+@mcp.tool()
+def prepare_master_export(render_start: str, render_length: str, sample_rate_hz: int = 48000,
+                          expected_duration_seconds: float | None = None,
+                          label: str = "Master mix") -> dict:
+    """Prepare a unique master WAV destination and settings for agent-operated Live UI export.
+
+    DOES NOT open the dialog or start rendering. The agent must use a functioning
+    computer-use skill and the returned workflow guide to operate Live. Initial
+    workflow supports fixed 4/4 only: start 1.1.1, duration 8.0.0 = eight bars.
+    Requires a user-approved range. Default stereo 24-bit WAV, normalization off.
+    UI rendering is unverified on this host because computer-use startup failed.
+    """
+    return prepare_export(render_start, render_length, sample_rate_hz, expected_duration_seconds, label)
+
+
+@mcp.tool()
+def get_master_export(job_id: str) -> dict:
+    """Read an export request/status. File existence alone does not prove rendering completed."""
+    return get_export(job_id)
+
+
+@mcp.tool()
+def list_master_exports() -> dict:
+    """List up to 100 saved export requests and verified results."""
+    return list_exports_jobs()
+
+
+@mcp.tool()
+def finish_master_export(job_id: str, observed_settings: ObservedExportSettings,
+                         render_complete_observed: bool) -> dict:
+    """Verify an agent-operated UI export and analyze the resulting WAV.
+
+    Supply actual settings observed in Live's export dialog and true only after
+    observing render completion. Checks file stability/format/rate/optional
+    duration, then performs full audio analysis. Does not initiate or finish UI
+    rendering itself. A mismatch leaves the request pending; do not infer facts.
+    """
+    return finish_export(job_id, observed_settings, render_complete_observed)
 
 
 @mcp.tool()
@@ -96,6 +138,44 @@ def get_project() -> dict:
 def get_devices(track: int) -> list:
     """Read top-level devices and parameters on a zero-based regular track."""
     return call("get_devices", track=track)
+
+
+@mcp.tool()
+def browse_audio_effects(parent_id: str | None = None, offset: int = 0) -> dict:
+    """Browse Live's Audio Effects tree, 50 children per page. Start with no parent_id.
+
+    Traverse folders by passing their item_id. Use next_offset for more children.
+    Handles expire on bridge restart. Only items reported loadable can be loaded.
+    This lists actual installed content; availability depends on Live edition.
+    """
+    return call("browse_audio_effects", parent_id=parent_id, offset=offset)
+
+
+@mcp.tool()
+def load_audio_effect(track: int, item_id: str, expected_item_name: str,
+                      expected_track_name: str, expected_device_names: list[str]) -> dict:
+    """Append one browsed audio effect/preset to a regular track, requiring writes enabled.
+
+    Inspect get_project/get_devices first and supply the current ordered device names.
+    Exit hot-swap mode. Check returned load_id with get_device_load before continuing.
+    Never retry pending/failed/unverified loads automatically: inspect Live first.
+    Loading changes track selection temporarily. Save the set before experimenting;
+    existing device snapshots cannot restore changed topology. Use Live Undo to remove
+    an addition. Rack internals, instruments and third-party plugin browsing excluded.
+    """
+    return call("load_audio_effect", track=track, item_id=item_id,
+                expected_item_name=expected_item_name, expected_track_name=expected_track_name,
+                expected_device_names=expected_device_names)
+
+
+@mcp.tool()
+def get_device_load(load_id: str) -> dict:
+    """Check delayed readback for an addition. Only completed + verified proves append.
+
+    Pending means wait and check again. Failed/unverified means inspect the chain,
+    do not retry automatically. IDs expire on bridge restart; no automatic rollback.
+    """
+    return call("get_device_load", load_id=load_id)
 
 
 @mcp.tool()
