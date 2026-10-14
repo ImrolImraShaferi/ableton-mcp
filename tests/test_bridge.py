@@ -57,6 +57,110 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(result, dict(track=0, volume=0.5, pan=-0.2))
 
 
+class TransportSceneTests(unittest.TestCase):
+    def setUp(self):
+        self.steps = []
+        self.song = types.SimpleNamespace(
+            start_time=8.0, current_song_time=12.0, record_mode=False,
+            session_record=False, is_playing=False, scenes=[types.SimpleNamespace(name="Original")],
+            tracks=[], tempo=120, signature_numerator=4, signature_denominator=4,
+            back_to_arranger=False, metronome=False, count_in_duration=0, loop=False,
+            song_length=100,
+            begin_undo_step=lambda: self.steps.append("begin"),
+            end_undo_step=lambda: self.steps.append("end"))
+        def create_scene(index):
+            self.song.scenes.insert(index, types.SimpleNamespace(name="New Scene"))
+        self.song.create_scene = create_scene
+        self.control = bridge.AbletonMCP.__new__(bridge.AbletonMCP)
+        self.control.song = lambda: self.song
+        bridge.ALLOW_WRITES = True
+
+    def tearDown(self):
+        bridge.ALLOW_WRITES = False
+
+    def test_start_marker_changes_without_seeking_or_playing(self):
+        result = self.control._dispatch("set_playback_start", dict(start_beats=32))
+        self.assertEqual(result, dict(previous_start_beats=8, start_beats=32))
+        self.assertEqual(self.song.current_song_time, 12)
+        self.assertFalse(self.song.is_playing)
+        self.assertEqual(self.steps, ["begin", "end"])
+        project = self.control._dispatch("get_project", {})
+        self.assertEqual(project["transport"]["start_beats"], 32)
+        self.assertEqual(project["time_signature"], dict(numerator=4, denominator=4))
+        self.assertEqual(project["scenes"], [dict(index=0, name="Original")])
+
+    def test_invalid_start_never_mutates(self):
+        for value in [-1, True, "32", None, float("nan"), float("inf")]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.control._dispatch("set_playback_start", dict(start_beats=value))
+        self.assertEqual(self.song.start_time, 8)
+        self.assertEqual(self.steps, [])
+
+    def test_append_and_insert_preserve_existing_scenes(self):
+        original = self.song.scenes[0]
+        result = self.control._dispatch("create_session_scene", dict(name="Chorus"))
+        self.assertEqual(result, dict(index=1, name="Chorus", scene_count=2))
+        result = self.control._dispatch("create_session_scene", dict(index=0))
+        self.assertEqual(result, dict(index=0, name="New Scene", scene_count=3))
+        self.assertIs(self.song.scenes[1], original)
+        self.assertEqual(self.steps, ["begin", "end", "begin", "end"])
+
+    def test_invalid_scene_inputs_never_mutate(self):
+        for params in [dict(index=-1), dict(index=2), dict(index=True), dict(index=0.5),
+                       dict(name=""), dict(name="  "), dict(name=12), dict(name="x" * 257)]:
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                self.control._dispatch("create_session_scene", params)
+        self.assertEqual(len(self.song.scenes), 1)
+        self.assertEqual(self.steps, [])
+
+    def test_write_recording_and_capture_guards(self):
+        requests = [("set_playback_start", dict(start_beats=32)),
+                    ("create_session_scene", dict(name="Verse"))]
+        bridge.ALLOW_WRITES = False
+        for method, params in requests:
+            with self.assertRaisesRegex(ValueError, "read-only"):
+                self.control._dispatch(method, params)
+        bridge.ALLOW_WRITES = True
+        for attr in ["record_mode", "session_record"]:
+            setattr(self.song, attr, True)
+            for method, params in requests:
+                with self.assertRaisesRegex(ValueError, "recording"):
+                    self.control._dispatch(method, params)
+            setattr(self.song, attr, False)
+        for status in ["recording", "finalizing", "cleaning"]:
+            self.control._captures = {"id": {"public": {"status": status}}}
+            for method, params in requests:
+                with self.assertRaisesRegex(ValueError, "Capture active"):
+                    self.control._dispatch(method, params)
+        self.assertEqual(self.steps, [])
+
+    def test_failed_scene_readback_closes_undo_and_warns_against_retry(self):
+        self.song.create_scene = lambda index: None
+        with self.assertRaisesRegex(RuntimeError, "inspect get_project before retrying"):
+            self.control._dispatch("create_session_scene", {})
+        self.assertEqual(self.steps, ["begin", "end"])
+
+    def test_marker_readback_failure_restores_previous_value(self):
+        class ClampingSong:
+            record_mode = session_record = False
+            def __init__(self):
+                self._start_time = 8
+            @property
+            def start_time(self):
+                return self._start_time
+            @start_time.setter
+            def start_time(self, value):
+                self._start_time = min(value, 16)
+        song = ClampingSong()
+        song.begin_undo_step = self.song.begin_undo_step
+        song.end_undo_step = self.song.end_undo_step
+        self.song = song
+        with self.assertRaisesRegex(RuntimeError, "original values restored"):
+            self.control._dispatch("set_playback_start", dict(start_beats=32))
+        self.assertEqual(song.start_time, 8)
+        self.assertEqual(self.steps, ["begin", "end"])
+
+
 class ExtendedTests(ValidationTests):
     def setUp(self):
         ValidationTests.setUp(self)

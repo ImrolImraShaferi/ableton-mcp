@@ -28,9 +28,25 @@ async def main():
                 "list_mixing_experiments", "read_mixing_experiment", "update_mixing_experiment",
                 "prepare_master_export", "get_master_export", "list_master_exports", "finish_master_export",
                 "browse_audio_effects", "load_audio_effect", "get_device_load",
-                "analyze_audio_section", "analyze_audio_timeline", "compare_audio_reference", "compare_aligned_stems"}
+                "analyze_audio_section", "analyze_audio_timeline", "compare_audio_reference", "compare_aligned_stems",
+                "prepare_resampling_track", "start_resampling_capture", "get_resampling_capture",
+                "cancel_resampling_capture", "finish_resampling_capture", "list_resampling_captures",
+                "list_live_resampling_captures", "set_playback_start", "create_session_scene"}
             result = await session.call_tool("get_project", {})
             assert result.isError, "Missing bridge token must produce an MCP tool error"
+            for name, arguments in [
+                ("set_playback_start", dict(start_beats=32)),
+                ("create_session_scene", dict(name="Verse")),
+                ("prepare_resampling_track", {}),
+                ("start_resampling_capture", dict(track=0, expected_track_name="Agent Capture", start_beats=0, length_beats=8)),
+                ("get_resampling_capture", dict(capture_id="a" * 32)),
+                ("cancel_resampling_capture", dict(capture_id="a" * 32)),
+                ("finish_resampling_capture", dict(capture_id="a" * 32)),
+                ("list_live_resampling_captures", {})]:
+                result = await session.call_tool(name, arguments)
+                assert result.isError, (name, "Missing token must fail")
+            result = await session.call_tool("list_resampling_captures", {})
+            assert not result.isError
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "silence.wav"
                 sf.write(path, np.zeros(48000), 48000)

@@ -2,7 +2,7 @@
 
 Agent-assisted mixing prototype for Ableton Live 11 Standard: inspect
 a set through a Python Remote Script, adjust existing effects, restore snapshots,
-and compare manually exported audio. No Max for
+and compare manually exported audio or automated real-time resampling captures. No Max for
 Live dependency. This is an experimental bridge; Live compatibility must be
 verified on the installed version before relying on it.
 
@@ -43,7 +43,19 @@ $env:ABLETON_MCP_TOKEN = Get-Content -Raw build/token.txt
 
 ## Tools and limits
 
-- `get_project`: tempo, playing state, regular track names, volume, pan, mute, solo.
+- `get_project`: tempo, time signature, transport position and playback start
+  marker in beats, Session scenes, regular track names, volume, pan, mute, solo.
+- `set_playback_start(start_beats)`: set the Arrangement playback start marker
+  using quarter-note beats from song origin (bar 1 = 0; bar 9 in 4/4 = 32).
+  Does not start playback or seek the current playhead. Requires writes enabled
+  and no recording or active capture; verifies readback and attempts rollback.
+- `create_session_scene(index, name)`: add an empty Session View scene in one
+  undo step. Omit index to append, or insert at a zero-based index from 0 through
+  the current scene count. Optional nonblank name, maximum 256 characters.
+  Requires writes enabled and no recording or active capture. Re-read scene
+  indices afterward. On timeout/error inspect scenes before retrying; an addition
+  may already have happened. Use Live Undo to remove an unwanted addition.
+
 - `get_devices(track)`: top-level devices and parameters; zero-based regular tracks.
 - `set_mixer(track, volume, pan)`: native volume 0..1 (not dB), pan -1..1.
 - `set_device_parameter`: change a top-level parameter using its native range,
@@ -88,6 +100,13 @@ $env:ABLETON_MCP_TOKEN = Get-Content -Raw build/token.txt
 - `finish_master_export`: validate recorded UI settings and an already rendered
   WAV, then analyze it. Does not operate or finish the export dialog itself.
 
+The playback start and scene controls use Live's documented
+[Song API](https://docs.cycling74.com/apiref/lom/song/) (`start_time` and
+`create_scene`). They are covered by mock tests; live verification on the
+installed version is still required. Update the installed Remote Script with
+`python scripts/update_bridge.py "<installed AbletonMCP folder>"`, then restart
+Live and reconnect the MCP client to discover the new tools.
+
 Writes are disabled by default. To test changes, open a disposable copy of a
 set, edit the **installed** `AbletonMCP/config.py` to set `ALLOW_WRITES = True`,
 and restart Live. Each write command creates an undo step. Re-read tracks before
@@ -100,12 +119,24 @@ objects are accessed only from scheduled control-surface callbacks. Requests
 have a three-second timeout and are not retried: if a write times out, inspect
 the current state before trying again because it may already have happened.
 
-This version does not listen to live audio, traverse rack chains, insert
-devices, export audio, save sets, or perform automatic mixing/mastering.
+This version does not perceptually listen to live audio, traverse rack chains,
+operate offline export, save sets, or perform automatic mixing/mastering.
 Use manually exported audio measurements to inform mix decisions. Rendering
 and mastering need a separately verified workflow.
 
 ## Agent-operated exports (UI rendering unverified)
+
+For auditioning without the Export menu or computer use, use the new
+[automated resampling workflow](docs/resampling-workflow.md). It adds a muted
+Resampling track, records a fixed-tempo Arrangement passage in real time,
+restores transport settings, and archives/analyzes the resulting stereo audio.
+Tools: `prepare_resampling_track`, `start_resampling_capture`,
+`get_resampling_capture`, `cancel_resampling_capture`,
+`list_live_resampling_captures`, `finish_resampling_capture`, and
+`list_resampling_captures`. Requires an updated bridge with writes enabled.
+Verified on Live 11.3.43: two non-silent stereo captures were automatically
+cropped, archived and analyzed; cancellation and original state restoration
+also passed. Native crop bypasses Windows locks on the original recording.
 
 The preparation and file-validation tools are implemented. Actual Live UI export
 testing is blocked on this host because the computer-use Node REPL fails at

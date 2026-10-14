@@ -7,6 +7,7 @@ from .experiments import (MixingChange, Decision, save_experiment, read_experime
                           update_experiment, list_experiments)
 from .exports import (ObservedExportSettings, prepare_export, get_export,
                       finish_export, list_exports_jobs)
+from .resampling import finish_capture, list_captures
 
 mcp = FastMCP("Ableton Live local prototype")
 
@@ -187,9 +188,106 @@ def call(method, **params):
 
 
 @mcp.tool()
+def prepare_resampling_track() -> dict:
+    """Create/reuse a dedicated muted Resampling audio track without computer use.
+
+    Requires writes enabled and stopped transport/recording. Adds a track on first
+    call, invalidating older topology-sensitive snapshots. Reuses only tracks
+    created by this bridge session. Capture clips are retained; no deletion.
+    """
+    return call("prepare_resampling_track")
+
+
+@mcp.tool()
+def start_resampling_capture(track: int, expected_track_name: str,
+                             start_beats: float, length_beats: float) -> dict:
+    """Start asynchronous real-time Master recording into a dedicated Session slot.
+
+    Use prepare_resampling_track first. Beats are quarter notes from Arrangement
+    origin: in 4/4 bar 1 = 0, bar 9 = 32; eight bars = 32 beats. Fixed tempo only,
+    duration 1..120 seconds. Stop transport/recording, disarm all tracks and return
+    tracks to Arrangement first. Temporarily disables metronome/loop, preserves count-in,
+    restores these and original stopped transport position when done. Includes
+    Master effects. Poll get_resampling_capture; never retry a timed-out start
+    automatically. Verified on Live 11.3.43 with repeated capture and cancellation.
+    """
+    return call("start_resampling_capture", track=track, expected_track_name=expected_track_name,
+                start_beats=start_beats, length_beats=length_beats)
+
+
+@mcp.tool()
+def get_resampling_capture(capture_id: str) -> dict:
+    """Read recording/completed/failed/cancelled status; IDs expire on bridge restart."""
+    return call("get_resampling_capture", capture_id=capture_id)
+
+
+@mcp.tool()
+def list_live_resampling_captures() -> list:
+    """Recover current bridge capture IDs/status after a timed-out start; never retry blindly.
+
+    Includes pending and terminal jobs. IDs expire on Live/bridge restart.
+    """
+    return call("list_live_resampling_captures")
+
+
+@mcp.tool()
+def cancel_resampling_capture(capture_id: str) -> dict:
+    """Stop capture and transport, disarm capture track, restore transport settings.
+
+    Retains partial clip/file for inspection. Requires writes enabled.
+    """
+    return call("cancel_resampling_capture", capture_id=capture_id)
+
+
+@mcp.tool()
+def finish_resampling_capture(capture_id: str) -> dict:
+    """Archive a completed stereo WAV/AIFF capture and analyze it, without UI export.
+
+    Checks bridge completion, stable source, copy integrity, finite audio and
+    duration within 100 ms at recorded fixed tempo. If Live locks the recording,
+    requests native crop of the agent-created capture; poll until completed and
+    finish again. Saves audio and provenance in
+    audio_exports/capture-ID. Does not prove sample-accurate alignment or listen
+    perceptually. Safe to repeat; archived results survive bridge restart.
+    """
+    return finish_capture(capture_id, call)
+
+
+@mcp.tool()
+def list_resampling_captures() -> dict:
+    """List up to 100 archived captures, newest first, including their audio paths."""
+    return list_captures()
+
+
+@mcp.tool()
 def get_project() -> dict:
-    """Read tempo, transport and track names from the current Live set."""
+    """Read tempo, time signature, transport/start marker, scenes, tracks and arming state."""
     return call("get_project")
+
+
+@mcp.tool()
+def set_playback_start(start_beats: float) -> dict:
+    """Set the Arrangement playback start marker in quarter-note beats from song origin.
+
+    Bar 1 = 0; in 4/4 bar 9 = 32. Read get_project for the time signature and
+    current transport.start_beats. Requires writes enabled, no recording or active
+    capture. Sets Song.start_time, without starting playback or seeking the current
+    playhead. Readback verified with attempted rollback on failure.
+    """
+    return call("set_playback_start", start_beats=start_beats)
+
+
+@mcp.tool()
+def create_session_scene(index: int | None = None, name: str | None = None) -> dict:
+    """Add an empty Session View scene, optionally named, in one Live undo step.
+
+    Omit index to append; otherwise use a zero-based insertion index from 0 through
+    the scene count in fresh get_project output. Requires writes enabled, no
+    recording or active capture. Does not launch the scene or copy existing clips.
+    Re-inspect scene indices after insertion. On timeout/error inspect get_project
+    before retrying because a scene may already exist; use Live Undo if needed.
+    """
+    return call("create_session_scene", index=index, name=name)
 
 
 @mcp.tool()
