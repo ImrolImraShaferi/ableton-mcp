@@ -28,6 +28,7 @@ async def main():
                 "list_mixing_experiments", "read_mixing_experiment", "update_mixing_experiment",
                 "prepare_master_export", "get_master_export", "list_master_exports", "finish_master_export",
                 "browse_audio_effects", "load_audio_effect", "get_device_load",
+                "browse_plugins", "load_vst3_plugin", "list_device_loads",
                 "analyze_audio_section", "analyze_audio_timeline", "compare_audio_reference", "compare_aligned_stems",
                 "prepare_resampling_track", "start_resampling_capture", "get_resampling_capture",
                 "cancel_resampling_capture", "finish_resampling_capture", "list_resampling_captures",
@@ -35,6 +36,10 @@ async def main():
             result = await session.call_tool("get_project", {})
             assert result.isError, "Missing bridge token must produce an MCP tool error"
             for name, arguments in [
+                ("browse_plugins", {}),
+                ("list_device_loads", {}),
+                ("load_vst3_plugin", dict(track=0, item_id="a" * 32, expected_item_name="VST3 Effect",
+                    expected_track_name="Guitar", expected_device_names=[], plugin_kind="audio_effect")),
                 ("set_playback_start", dict(start_beats=32)),
                 ("create_session_scene", dict(name="Verse")),
                 ("prepare_resampling_track", {}),

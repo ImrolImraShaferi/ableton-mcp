@@ -88,7 +88,7 @@ class AbletonMCP(ControlSurface):
                 self._end_capture(job, "cancelled")
             return dict(job["public"])
         if any(j["public"]["status"] in ("recording", "finalizing", "cleaning") for j in getattr(self, "_captures", {}).values()):
-            if method not in ("get_project", "get_devices", "list_device_snapshots", "get_device_load"):
+            if method not in ("get_project", "get_devices", "list_device_snapshots", "get_device_load", "list_device_loads"):
                 raise ValueError("Capture active; wait or cancel before other commands")
         if method == "finalize_resampling_capture":
             self._require_writes()
@@ -121,10 +121,17 @@ class AbletonMCP(ControlSurface):
             self._require_writes()
             return self._start_capture(song, params)
         if method == "browse_audio_effects":
-            return self._browse_audio_effects(params)
+            return self._browse_browser("audio_effects", params)
+        if method == "browse_plugins":
+            return self._browse_browser("plugins", params)
         if method == "load_audio_effect":
             self._require_writes()
-            return self._load_audio_effect(song, params)
+            return self._load_browser_device(song, params, "audio_effects")
+        if method == "load_vst3_plugin":
+            self._require_writes()
+            return self._load_browser_device(song, params, "plugins")
+        if method == "list_device_loads":
+            return [dict(job) for job in self._device_loads.values()]
         if method == "get_device_load":
             job = self._device_loads.get(params.get("load_id"))
             if job is None:
@@ -177,6 +184,8 @@ class AbletonMCP(ControlSurface):
                                        metronome=song.metronome, count_in_duration=int(song.count_in_duration), loop=song.loop,
                                        arrangement_length_beats=song.song_length),
                         tracks=[dict(index=i, name=t.name, mute=t.mute, solo=t.solo,
+                                     has_audio_input=bool(t.has_audio_input),
+                                     has_midi_input=bool(t.has_midi_input),
                                      armed=bool(t.arm) if t.can_be_armed else False,
                                      volume=t.mixer_device.volume.value,
                                      pan=t.mixer_device.panning.value)
@@ -188,7 +197,8 @@ class AbletonMCP(ControlSurface):
             raise ValueError("Invalid regular track index")
         track = song.tracks[index]
         if method == "get_devices":
-            return [dict(index=i, name=d.name, parameters=[
+            return [dict(index=i, name=d.name, class_name=d.class_name,
+                         device_kind=self._device_kind(d), parameters=[
                 dict(index=j, name=p.name, value=p.value, min=p.min, max=p.max,
                      enabled=p.is_enabled, quantized=p.is_quantized)
                 for j, p in enumerate(d.parameters)]) for i, d in enumerate(track.devices)]
@@ -452,15 +462,30 @@ class AbletonMCP(ControlSurface):
         except Exception as exc:
             job["public"].update(status="failed", error=str(exc))
 
-    def _browse_audio_effects(self, params):
+    @staticmethod
+    def _device_kind(device):
+        # Live's Device.type: 0 undefined, 1 instrument, 2 audio effect, 3 MIDI effect.
+        return {1: "instrument", 2: "audio_effect", 3: "midi_effect"}.get(
+            getattr(device, "type", 0), "unknown")
+
+    def _browse_browser(self, category, params):
         # Session handles retain the actual BrowserItem, avoiding guessed names/URIs.
         parent_id = params.get("parent_id")
         if parent_id is None:
-            parent = self.application().browser.audio_effects
-        else:
-            parent = self._browser_items.get(parent_id)
+            parent = getattr(self.application().browser, category, None)
             if parent is None:
+                raise ValueError("Live does not expose the " + category + " browser tree")
+            plugin_format = None
+            path = []
+        else:
+            handle = self._browser_items.get(parent_id)
+            if handle is None:
                 raise ValueError("Unknown or expired browser item; browse again")
+            if handle["category"] != category:
+                raise ValueError("Browser item belongs to a different category; browse again")
+            parent = handle["item"]
+            plugin_format = handle["plugin_format"]
+            path = handle["path"]
         offset = params.get("offset", 0)
         if type(offset) is not int or offset < 0:
             raise ValueError("Offset must be a nonnegative integer")
@@ -472,13 +497,32 @@ class AbletonMCP(ControlSurface):
         items = []
         for item in children[offset:offset + 50]:
             item_id = uuid.uuid4().hex
-            self._browser_items[item_id] = item
-            items.append(dict(item_id=item_id, name=item.name,
-                              loadable=bool(item.is_loadable), folder=bool(item.is_folder)))
+            item_format = plugin_format
+            if category == "plugins":
+                # Live 11 groups plug-ins by format. Newer versions may expose
+                # a flat tree; accept only a format identified by Live itself.
+                uri = str(getattr(item, "uri", "")).lower()
+                if uri.startswith("vst3:"):
+                    item_format = "VST3"
+                elif uri.startswith("vst:"):
+                    item_format = "VST2"
+                elif uri.startswith("au:"):
+                    item_format = "AU"
+                elif parent_id is None and item.is_folder:
+                    item_format = {"VST3": "VST3", "VST": "VST2", "VST2": "VST2",
+                                   "Audio Units": "AU", "AU": "AU"}.get(item.name)
+            item_path = path + [item.name]
+            self._browser_items[item_id] = dict(item=item, category=category,
+                plugin_format=item_format, path=item_path)
+            public = dict(item_id=item_id, name=item.name,
+                          loadable=bool(item.is_loadable), folder=bool(item.is_folder))
+            if category == "plugins":
+                public.update(plugin_format=item_format, path=item_path)
+            items.append(public)
         return dict(items=items, total=len(children),
                     next_offset=offset + 50 if offset + 50 < len(children) else None)
 
-    def _load_audio_effect(self, song, params):
+    def _load_browser_device(self, song, params, category):
         import Live
         index = self._index(params.get("track"), song.tracks, "regular track")
         track = song.tracks[index]
@@ -486,11 +530,31 @@ class AbletonMCP(ControlSurface):
         if (params.get("expected_track_name") != track.name or
                 params.get("expected_device_names") != [d.name for d in devices]):
             raise ValueError("Target changed; inspect tracks and devices again")
-        item = self._browser_items.get(params.get("item_id"))
-        if item is None or not item.is_loadable:
+        handle = self._browser_items.get(params.get("item_id"))
+        if handle is None or not handle["item"].is_loadable:
             raise ValueError("Unknown, expired or non-loadable browser item")
+        if handle["category"] != category:
+            raise ValueError("Browser item belongs to a different category; browse again")
+        item = handle["item"]
         if params.get("expected_item_name") != item.name:
             raise ValueError("Browser item changed; browse again")
+        if category == "plugins":
+            if handle["plugin_format"] != "VST3":
+                raise ValueError("Only browser items identified by Live as VST3 can be loaded")
+            kind = params.get("plugin_kind")
+            if kind not in ("audio_effect", "instrument"):
+                raise ValueError("plugin_kind must be audio_effect or instrument")
+            kinds = [self._device_kind(device) for device in devices]
+            if kind == "instrument":
+                if not track.has_midi_input:
+                    raise ValueError("VST3 instruments require a MIDI track")
+                if any(k != "midi_effect" for k in kinds):
+                    raise ValueError("Use a MIDI track containing only MIDI effects or no devices; "
+                                     "existing instruments/audio devices will not be replaced")
+            elif not track.has_audio_input and "instrument" not in kinds:
+                raise ValueError("VST3 audio effects require an audio track or a MIDI track with an instrument")
+            if song.record_mode or song.session_record:
+                raise ValueError("Stop recording before loading a VST3 plug-in")
         if any(job["status"] == "pending" for job in self._device_loads.values()):
             raise ValueError("A device load is pending; check its status before loading again")
         if len(self._device_loads) >= 100:
@@ -507,10 +571,15 @@ class AbletonMCP(ControlSurface):
         old_device = track.view.selected_device
         load_id = uuid.uuid4().hex
         job = dict(load_id=load_id, status="pending", track=index,
-                   track_name=track.name, browser_item_name=item.name, verified=False)
+                   track_name=track.name, browser_item_name=item.name, verified=False,
+                   view_restored=True)
+        if category == "plugins":
+            job.update(plugin_format="VST3", plugin_kind=kind, browser_path=handle["path"])
         self._device_loads[load_id] = job
-        song.begin_undo_step()
+        undo_started = False
         try:
+            song.begin_undo_step()
+            undo_started = True
             song.view.selected_track = track
             if devices:
                 song.view.select_device(devices[-1])
@@ -519,25 +588,44 @@ class AbletonMCP(ControlSurface):
         except Exception as exc:
             job.update(status="failed", error=str(exc) + "; inspect Live before retrying")
         finally:
-            try:
-                track.view.device_insert_mode = old_mode
-                if old_device is not None:
-                    song.view.select_device(old_device)
-                song.view.selected_track = old_track
-            finally:
-                song.end_undo_step()
+            # A plug-in can change selection or reject initialization. Attempt
+            # each restoration independently so one stale selection cannot
+            # strand an otherwise loaded device in pending forever.
+            restores = [lambda: setattr(track.view, "device_insert_mode", old_mode)]
+            if old_device is not None:
+                restores.append(lambda: song.view.select_device(old_device))
+            restores.append(lambda: setattr(song.view, "selected_track", old_track))
+            if undo_started:
+                restores.append(song.end_undo_step)
+            errors = []
+            for restore in restores:
+                try:
+                    restore()
+                except Exception as exc:
+                    errors.append(str(exc))
+            if errors:
+                job.update(view_restored=False, restoration_errors=errors)
         if job["status"] == "pending":
-            self.schedule_message(2, lambda: self._verify_device_load(load_id, song, track, devices))
+            deadline = time.monotonic() + 15 if category == "plugins" else None
+            self.schedule_message(2, lambda: self._verify_device_load(
+                load_id, song, track, devices, deadline))
         return dict(job)
 
-    def _verify_device_load(self, load_id, song, track, before):
+    def _verify_device_load(self, load_id, song, track, before, deadline=None):
         job = self._device_loads[load_id]
         try:
             current = tuple(track.devices)
+            if (deadline is not None and self.song() == song and track in song.tracks
+                    and current == before and time.monotonic() < deadline):
+                self.schedule_message(2, lambda: self._verify_device_load(
+                    load_id, song, track, before, deadline))
+                return
             if (self.song() != song or track not in song.tracks or
                     len(current) != len(before) + 1 or current[:-1] != before):
                 raise ValueError("Expected one appended device with the original chain intact")
             device = current[-1]
+            if "plugin_kind" in job and self._device_kind(device) != job["plugin_kind"]:
+                raise ValueError("Loaded device type differs from requested plugin_kind")
             job.update(status="completed", verified=True, device=len(before),
                        device_name=device.name, class_name=device.class_name)
         except Exception as exc:

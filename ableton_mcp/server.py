@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 from mcp.server.fastmcp import FastMCP
 from .client import BridgeClient
 from .audio import analyze_file, list_exports, compare_files
@@ -261,7 +262,7 @@ def list_resampling_captures() -> dict:
 
 @mcp.tool()
 def get_project() -> dict:
-    """Read tempo, time signature, transport/start marker, scenes, tracks and arming state."""
+    """Read tempo, transport, scenes, tracks, audio/MIDI input types and arming state."""
     return call("get_project")
 
 
@@ -292,7 +293,7 @@ def create_session_scene(index: int | None = None, name: str | None = None) -> d
 
 @mcp.tool()
 def get_devices(track: int) -> list:
-    """Read top-level devices and parameters on a zero-based regular track."""
+    """Read top-level device names, classes, kinds and parameters on a regular track."""
     return call("get_devices", track=track)
 
 
@@ -305,6 +306,44 @@ def browse_audio_effects(parent_id: str | None = None, offset: int = 0) -> dict:
     This lists actual installed content; availability depends on Live edition.
     """
     return call("browse_audio_effects", parent_id=parent_id, offset=offset)
+
+
+@mcp.tool()
+def browse_plugins(parent_id: str | None = None, offset: int = 0) -> dict:
+    """Browse installed plug-ins in Live, 50 children per page; start without parent_id.
+
+    Traverse returned folder item_ids and next_offset pages until a loadable item
+    is found. plugin_format is VST3, VST2, AU or null when not identified; only
+    VST3 items are supported by load_vst3_plugin. path distinguishes vendors and
+    formats with identical names. Requires enabled/scanned plug-in sources in Live.
+    No installation or rescan is performed. IDs expire on bridge restart and
+    cannot be mixed with browse_audio_effects handles.
+    """
+    return call("browse_plugins", parent_id=parent_id, offset=offset)
+
+
+@mcp.tool()
+def load_vst3_plugin(track: int, item_id: str, expected_item_name: str,
+                     expected_track_name: str, expected_device_names: list[str],
+                     plugin_kind: Literal["audio_effect", "instrument"]) -> dict:
+    """Append one installed VST3 from browse_plugins, requiring writes enabled.
+
+    Inspect get_project/get_devices and supply fresh ordered device names, track
+    name and browser item name. Choose plugin_kind from the plug-in's documented
+    function; Live may not expose its type before loading. Audio effects require
+    an audio track or MIDI track with an instrument. Instruments require a MIDI
+    track with no devices or only MIDI effects; replacement is not supported.
+    Exit hot-swap and stop recording. Poll get_device_load until completed AND
+    verified; initialization is allowed 15 seconds after the load call returns.
+    If the request times out, use list_device_loads and inspect the chain; never
+    retry pending/failed/unverified loads automatically. Loading may open a
+    plug-in window or licensing dialog. Save the set first; use Live Undo to
+    remove additions. Does not install plug-ins, load into rack chains, or expose
+    parameters that the plug-in has not published to Live.
+    """
+    return call("load_vst3_plugin", track=track, item_id=item_id,
+                expected_item_name=expected_item_name, expected_track_name=expected_track_name,
+                expected_device_names=expected_device_names, plugin_kind=plugin_kind)
 
 
 @mcp.tool()
@@ -332,6 +371,17 @@ def get_device_load(load_id: str) -> dict:
     do not retry automatically. IDs expire on bridge restart; no automatic rollback.
     """
     return call("get_device_load", load_id=load_id)
+
+
+@mcp.tool()
+def list_device_loads() -> list:
+    """Recover pending/terminal device load IDs after a timeout; do not load again.
+
+    Includes stock-effect and VST3 loads. IDs expire on bridge restart. Inspect
+    get_devices as well; completed + verified proves one appended device with
+    the original chain intact, not musical suitability or licensing status.
+    """
+    return call("list_device_loads")
 
 
 @mcp.tool()

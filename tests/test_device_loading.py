@@ -11,11 +11,11 @@ class DeviceLoadingTests(unittest.TestCase):
         self.control._device_loads = {}
         self.effect = types.SimpleNamespace(name="EQ Eight", is_loadable=True, is_folder=False, children=[])
         folder = types.SimpleNamespace(name="EQ", is_loadable=False, is_folder=True, children=[self.effect])
-        self.track = types.SimpleNamespace(name="Guitar", devices=[],
+        self.track = types.SimpleNamespace(name="Guitar", devices=[], has_audio_input=True, has_midi_input=False,
                                           view=types.SimpleNamespace(device_insert_mode="default", selected_device=None))
         self.previous = object()
         self.steps = []
-        self.song = types.SimpleNamespace(tracks=[self.track],
+        self.song = types.SimpleNamespace(tracks=[self.track], record_mode=False, session_record=False,
             view=types.SimpleNamespace(selected_track=self.previous),
             begin_undo_step=lambda: self.steps.append("begin"),
             end_undo_step=lambda: self.steps.append("end"))
