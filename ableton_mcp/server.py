@@ -1,5 +1,6 @@
 import os
 from typing import Literal
+from pydantic import StrictInt
 from mcp.server.fastmcp import FastMCP
 from .client import BridgeClient
 from .audio import analyze_file, list_exports, compare_files
@@ -301,7 +302,8 @@ def get_devices(track: int) -> list:
 def browse_audio_effects(parent_id: str | None = None, offset: int = 0) -> dict:
     """Browse Live's Audio Effects tree, 50 children per page. Start with no parent_id.
 
-    Traverse folders by passing their item_id. Use next_offset for more children.
+    Traverse categories/devices by passing their item_id; Live's virtual categories
+    may report folder=false despite having children. Use next_offset for more children.
     Handles expire on bridge restart. Only items reported loadable can be loaded.
     This lists actual installed content; availability depends on Live edition.
     """
@@ -325,14 +327,20 @@ def browse_plugins(parent_id: str | None = None, offset: int = 0) -> dict:
 @mcp.tool()
 def load_vst3_plugin(track: int, item_id: str, expected_item_name: str,
                      expected_track_name: str, expected_device_names: list[str],
-                     plugin_kind: Literal["audio_effect", "instrument"]) -> dict:
-    """Append one installed VST3 from browse_plugins, requiring writes enabled.
+                     plugin_kind: Literal["audio_effect", "instrument"],
+                     position: StrictInt | None = None) -> dict:
+    """Insert one installed VST3 from browse_plugins, requiring writes enabled.
 
     Inspect get_project/get_devices and supply fresh ordered device names, track
     name and browser item name. Choose plugin_kind from the plug-in's documented
     function; Live may not expose its type before loading. Audio effects require
     an audio track or MIDI track with an instrument. Instruments require a MIDI
     track with no devices or only MIDI effects; replacement is not supported.
+    position is a zero-based slot in the current top-level chain: 0 before the
+    first device, current device count at the end; omit/null to append. Audio
+    effects must stay after the instrument on MIDI tracks; instruments must
+    follow all MIDI effects. Verification checks the requested position and
+    the identities/order of every original device. Rack-chain insertion excluded.
     Exit hot-swap and stop recording. Poll get_device_load until completed AND
     verified; initialization is allowed 15 seconds after the load call returns.
     If the request times out, use list_device_loads and inspect the chain; never
@@ -343,15 +351,20 @@ def load_vst3_plugin(track: int, item_id: str, expected_item_name: str,
     """
     return call("load_vst3_plugin", track=track, item_id=item_id,
                 expected_item_name=expected_item_name, expected_track_name=expected_track_name,
-                expected_device_names=expected_device_names, plugin_kind=plugin_kind)
+                expected_device_names=expected_device_names, plugin_kind=plugin_kind,
+                position=position)
 
 
 @mcp.tool()
 def load_audio_effect(track: int, item_id: str, expected_item_name: str,
-                      expected_track_name: str, expected_device_names: list[str]) -> dict:
-    """Append one browsed audio effect/preset to a regular track, requiring writes enabled.
+                      expected_track_name: str, expected_device_names: list[str],
+                      position: StrictInt | None = None) -> dict:
+    """Insert one browsed audio effect/preset on a regular track, requiring writes enabled.
 
     Inspect get_project/get_devices first and supply the current ordered device names.
+    position is a zero-based slot: 0 before the first device, current device count
+    at the end; omit/null to append. On MIDI tracks, effects must stay after the
+    instrument. Stop recording. Verification checks position and original order.
     Exit hot-swap mode. Check returned load_id with get_device_load before continuing.
     Never retry pending/failed/unverified loads automatically: inspect Live first.
     Loading changes track selection temporarily. Save the set before experimenting;
@@ -360,12 +373,12 @@ def load_audio_effect(track: int, item_id: str, expected_item_name: str,
     """
     return call("load_audio_effect", track=track, item_id=item_id,
                 expected_item_name=expected_item_name, expected_track_name=expected_track_name,
-                expected_device_names=expected_device_names)
+                expected_device_names=expected_device_names, position=position)
 
 
 @mcp.tool()
 def get_device_load(load_id: str) -> dict:
-    """Check delayed readback for an addition. Only completed + verified proves append.
+    """Check readback for an insertion. Only completed + verified proves correct placement.
 
     Pending means wait and check again. Failed/unverified means inspect the chain,
     do not retry automatically. IDs expire on bridge restart; no automatic rollback.
@@ -378,8 +391,8 @@ def list_device_loads() -> list:
     """Recover pending/terminal device load IDs after a timeout; do not load again.
 
     Includes stock-effect and VST3 loads. IDs expire on bridge restart. Inspect
-    get_devices as well; completed + verified proves one appended device with
-    the original chain intact, not musical suitability or licensing status.
+    get_devices as well; completed + verified proves one device inserted at
+    position with the original chain intact, not musical suitability/licensing.
     """
     return call("list_device_loads")
 

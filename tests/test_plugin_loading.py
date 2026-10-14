@@ -32,10 +32,8 @@ class PluginLoadingTests(unittest.TestCase):
 
     def load(self, browser_item):
         self.assertIs(self.song.view.selected_track, self.track)
-        if self.track.devices:
-            self.assertIs(self.track.view.selected_device, self.track.devices[-1])
-            self.assertEqual(self.track.view.device_insert_mode, "selected_right")
-        self.track.devices.append(types.SimpleNamespace(
+        position = device_tests.insertion_position(self.track)
+        self.track.devices.insert(position, types.SimpleNamespace(
             name=browser_item.name, type=getattr(self, "loaded_kind", 2), class_name="PluginDevice", parameters=[]))
 
     def dispatch(self, **changes):
@@ -266,3 +264,68 @@ class PluginLoadingTests(unittest.TestCase):
         result = self.dispatch()
         self.callbacks.pop()()
         self.assertTrue(self.status(result)["verified"])
+
+    def test_vst3_start_middle_and_explicit_end(self):
+        for position in (0, 1, 2):
+            with self.subTest(position=position):
+                original = [types.SimpleNamespace(name="Effect One", type=2),
+                            types.SimpleNamespace(name="Effect Two", type=2)]
+                self.track.devices = original[:]
+                self.track.view.selected_device = original[0]
+                result = self.dispatch(position=position, expected_device_names=["Effect One", "Effect Two"])
+                self.callbacks.pop()()
+                self.assertTrue(self.status(result)["verified"])
+                self.assertEqual(self.status(result)["device"], position)
+                self.assertEqual(self.track.devices[position].name, "Test Effect")
+                remaining = self.track.devices[:position] + self.track.devices[position + 1:]
+                self.assertTrue(all(a is b for a, b in zip(remaining, original)))
+                self.assertIs(self.track.view.selected_device, original[0])
+
+    def test_vst3_invalid_position_has_no_side_effects(self):
+        for position in (-1, 1, True, 0.5, "0"):
+            with self.subTest(position=position), self.assertRaisesRegex(ValueError, "Position"):
+                self.dispatch(position=position)
+        self.assertEqual(self.steps, [])
+
+    def test_effect_cannot_precede_instrument_but_can_precede_audio_effects(self):
+        self.midi_track()
+        midi = types.SimpleNamespace(name="Arpeggiator", type=3)
+        synth = types.SimpleNamespace(name="Synth", type=1)
+        effect = types.SimpleNamespace(name="Reverb", type=2)
+        self.track.devices = [midi, synth, effect]
+        for position in (0, 1):
+            with self.assertRaisesRegex(ValueError, "after the instrument"):
+                self.dispatch(position=position, expected_device_names=["Arpeggiator", "Synth", "Reverb"])
+        self.assertEqual(self.steps, [])
+        result = self.dispatch(position=2, expected_device_names=["Arpeggiator", "Synth", "Reverb"])
+        self.callbacks.pop()()
+        self.assertTrue(self.status(result)["verified"])
+        self.assertEqual([d.name for d in self.track.devices],
+                         ["Arpeggiator", "Synth", "Test Effect", "Reverb"])
+
+    def test_instrument_cannot_precede_midi_effects(self):
+        self.midi_track()
+        self.loaded_kind = 1
+        self.track.devices = [types.SimpleNamespace(name="Arpeggiator", type=3)]
+        with self.assertRaisesRegex(ValueError, "after all MIDI effects"):
+            self.synth(position=0, expected_device_names=["Arpeggiator"])
+        self.assertEqual(self.steps, [])
+        result = self.synth(position=1, expected_device_names=["Arpeggiator"])
+        self.callbacks.pop()()
+        self.assertTrue(self.status(result)["verified"])
+
+    def test_slow_initialization_at_start_and_wrong_position_readback(self):
+        original = types.SimpleNamespace(name="Existing", type=2)
+        self.track.devices = [original]
+        self.browser.load_item = lambda browser_item: None
+        result = self.dispatch(position=0, expected_device_names=["Existing"])
+        self.callbacks.pop()()
+        self.assertEqual(self.status(result)["status"], "pending")
+        self.track.devices.insert(0, types.SimpleNamespace(name="Test Effect", type=2, class_name="PluginDevice"))
+        self.callbacks.pop()()
+        self.assertTrue(self.status(result)["verified"])
+        self.track.devices = [original]
+        result = self.dispatch(position=0, expected_device_names=["Existing"])
+        self.track.devices.append(types.SimpleNamespace(name="Test Effect", type=2, class_name="PluginDevice"))
+        self.callbacks.pop()()
+        self.assertEqual(self.status(result)["status"], "unverified")

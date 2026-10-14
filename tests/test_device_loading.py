@@ -4,6 +4,20 @@ import unittest
 from test_bridge import bridge
 
 
+def insertion_position(track):
+    if not track.devices:
+        if track.view.device_insert_mode != "default":
+            raise AssertionError("Empty track must use the default insertion mode")
+        return 0
+    selected = next(i for i, device in enumerate(track.devices)
+                    if device is track.view.selected_device)
+    if track.view.device_insert_mode == "selected_left":
+        return selected
+    if track.view.device_insert_mode == "selected_right":
+        return selected + 1
+    raise AssertionError("Expected an explicit insertion side on a nonempty track")
+
+
 class DeviceLoadingTests(unittest.TestCase):
     def setUp(self):
         self.control = bridge.AbletonMCP.__new__(bridge.AbletonMCP)
@@ -27,7 +41,8 @@ class DeviceLoadingTests(unittest.TestCase):
         self.callbacks = []
         self.control.schedule_message = lambda ticks, callback: self.callbacks.append(callback)
         sys.modules["Live"] = types.SimpleNamespace(Track=types.SimpleNamespace(
-            DeviceInsertMode=types.SimpleNamespace(default="default", selected_right="selected_right")))
+            DeviceInsertMode=types.SimpleNamespace(default="default", selected_right="selected_right",
+                                                   selected_left="selected_left")))
         bridge.ALLOW_WRITES = True
         parent = self.control._dispatch("browse_audio_effects", {})["items"][0]
         leaf = self.control._dispatch("browse_audio_effects", {"parent_id": parent["item_id"]})["items"][0]
@@ -40,12 +55,8 @@ class DeviceLoadingTests(unittest.TestCase):
 
     def load(self, item):
         self.assertIs(self.song.view.selected_track, self.track)
-        if self.track.devices:
-            self.assertIs(self.track.view.selected_device, self.track.devices[-1])
-            self.assertEqual(self.track.view.device_insert_mode, "selected_right")
-        else:
-            self.assertEqual(self.track.view.device_insert_mode, "default")
-        self.track.devices.append(types.SimpleNamespace(name=item.name, class_name="Eq8"))
+        position = insertion_position(self.track)
+        self.track.devices.insert(position, types.SimpleNamespace(name=item.name, class_name="Eq8", type=2))
 
     def dispatch(self, **changes):
         return self.control._dispatch("load_audio_effect", dict(self.params, **changes))
@@ -131,3 +142,57 @@ class DeviceLoadingTests(unittest.TestCase):
         for params in [{"offset": True}, {"offset": -1}, {"parent_id": "expired"}]:
             with self.assertRaises(ValueError):
                 self.control._dispatch("browse_audio_effects", params)
+
+    def test_start_middle_and_explicit_end_preserve_original_order(self):
+        for position in (0, 1, 2):
+            with self.subTest(position=position):
+                original = [types.SimpleNamespace(name="Amp", type=2),
+                            types.SimpleNamespace(name="Tuner", type=2)]
+                self.track.devices = original[:]
+                self.track.view.selected_device = original[1]
+                result = self.dispatch(position=position, expected_device_names=["Amp", "Tuner"])
+                self.callbacks.pop()()
+                self.assertEqual(result["position"], position)
+                self.assertIs(self.track.view.selected_device, original[1])
+                self.assertEqual(self.track.view.device_insert_mode, "default")
+                status = self.control._dispatch("get_device_load", {"load_id": result["load_id"]})
+                self.assertTrue(status["verified"])
+                self.assertEqual(status["device"], position)
+                self.assertEqual([d.name for d in self.track.devices],
+                                 [d.name for d in original[:position]] + ["EQ Eight"] +
+                                 [d.name for d in original[position:]])
+                remaining = self.track.devices[:position] + self.track.devices[position + 1:]
+                self.assertTrue(all(a is b for a, b in zip(remaining, original)))
+
+    def test_invalid_positions_rejected_before_any_write(self):
+        for position in (-1, 1, True, False, 0.5, "0", float("nan")):
+            with self.subTest(position=position), self.assertRaisesRegex(ValueError, "Position"):
+                self.dispatch(position=position)
+        self.assertEqual(self.steps, [])
+        self.assertEqual(self.track.devices, [])
+
+    def test_wrong_insertion_position_or_reordered_chain_is_unverified(self):
+        original = [types.SimpleNamespace(name="Amp", type=2), types.SimpleNamespace(name="Tuner", type=2)]
+        self.track.devices = original[:]
+        self.browser.load_item = lambda item: self.track.devices.append(
+            types.SimpleNamespace(name=item.name, class_name="Eq8", type=2))
+        result = self.dispatch(position=0, expected_device_names=["Amp", "Tuner"])
+        self.callbacks.pop()()
+        self.assertEqual(self.control._device_loads[result["load_id"]]["status"], "unverified")
+        self.track.devices = original[:]
+        self.browser.load_item = self.load
+        result = self.dispatch(position=1, expected_device_names=["Amp", "Tuner"])
+        self.track.devices[0], self.track.devices[2] = self.track.devices[2], self.track.devices[0]
+        self.callbacks.pop()()
+        self.assertEqual(self.control._device_loads[result["load_id"]]["status"], "unverified")
+
+    def test_stock_effect_on_midi_track_must_follow_instrument(self):
+        self.track.has_audio_input = False
+        self.track.has_midi_input = True
+        self.track.devices = [types.SimpleNamespace(name="Synth", type=1)]
+        with self.assertRaisesRegex(ValueError, "after the instrument"):
+            self.dispatch(position=0, expected_device_names=["Synth"])
+        self.assertEqual(self.steps, [])
+        result = self.dispatch(position=1, expected_device_names=["Synth"])
+        self.callbacks.pop()()
+        self.assertTrue(self.control._device_loads[result["load_id"]]["verified"])

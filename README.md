@@ -59,7 +59,7 @@ $env:ABLETON_MCP_TOKEN = Get-Content -Raw build/token.txt
 - `get_devices(track)`: top-level devices, class names, device kinds and parameters;
   zero-based regular tracks. `get_project` includes audio/MIDI input flags.
 - `browse_plugins`: browse Live's installed Plug-Ins tree, including format and
-  vendor paths. `load_vst3_plugin`: append a VST3 effect or instrument with track
+  vendor paths. `load_vst3_plugin`: insert a VST3 effect or instrument with track
   compatibility checks. `list_device_loads`: recover status after a load timeout.
   See the [VST3 workflow](docs/plugin-workflow.md) for requirements and limits.
 - `set_mixer(track, volume, pan)`: native volume 0..1 (not dB), pan -1..1.
@@ -338,16 +338,23 @@ Loading requires the current track name, ordered device names and browser item
 name from fresh inspection. These stock-effect tools support only regular tracks
 and content under Audio Effects. For installed VST3 effects and instruments, use
 `browse_plugins` and `load_vst3_plugin` instead. Rack-chain insertion is excluded.
-Live must be out of hot-swap mode. The effect is appended at the end of the chain.
+Live must be out of hot-swap mode and recording must be stopped. Both loaders
+accept an optional zero-based `position`: 0 before the first device, 2 before the
+third device, or the current device count at the end. Omit it or pass null to
+append. Positions must be integers from 0 through the current device count.
+On MIDI tracks, audio effects must stay after the instrument; a new instrument
+must follow all MIDI effects. Only top-level insertion is supported.
 The bridge temporarily selects the track, restores selection, and groups the load
-into an undo step. A later scheduled check verifies exactly one device was appended
-and the old chain stayed intact. A pending status must be checked again; a failed
+into an undo step. A later scheduled check verifies exactly one device was inserted
+at the requested position and the original devices stayed in order. Load jobs
+report the resolved `position` and, on verified completion, its `device` index.
+A pending status must be checked again; a failed
 or unverified load must be inspected before any retry to avoid duplicates.
 Handles and load statuses expire on bridge restart.
 
 ## Agent-operated VST3 plug-ins
 
-Agents can browse installed plug-ins with `browse_plugins` and append a selected
+Agents can browse installed plug-ins with `browse_plugins` and insert a selected
 VST3 with `load_vst3_plugin`. Effects require an audio track or a MIDI track with
 an instrument. Instruments require a MIDI track with no devices or only MIDI
 effects; existing instruments are not replaced. Format is identified from Live's
@@ -369,6 +376,9 @@ sforzando instrument insertion, device/type/parameter readback and view restorat
 passed in the default empty set. Mock tests cover delayed initialization, timeouts,
 incompatible tracks, changed chains and failure recovery. Other plug-ins and Live
 versions may behave differently, especially with licensing dialogs.
+Start and middle insertion were also verified live with AgentMeter and EQ Eight
+in nonempty chains: requested positions, original order and view restoration all
+passed. All 142 unit tests and the MCP discovery/schema checks passed.
 
 Use Live Undo to remove a test addition. Device snapshots capture parameter values;
 they do not remove new devices, and adding a device invalidates old device snapshots.

@@ -35,7 +35,13 @@ cannot remove devices or restore the previous device chain.
    Instruments need a MIDI track with no devices or only MIDI effects. The
    loader rejects instrument replacement and insertion into rack chains. Stop
    recording and leave hot-swap mode. Capture must also be inactive.
-4. Call `load_vst3_plugin` using fresh values. For example:
+4. Choose a zero-based insertion slot using the current device list. `position: 0`
+   means before the first device; `position: 2` means before the third device;
+   the current device count means the end. Omit `position` or pass null to append.
+   Only slots 0 through the current device count are accepted. On MIDI tracks,
+   audio effects must follow the instrument; a new instrument must follow all
+   MIDI effects. Inserting a plug-in does not move any existing device. For example,
+   to meter the input before Amp and Tuner, use:
 
    ```json
    {
@@ -44,16 +50,21 @@ cannot remove devices or restore the previous device chain.
      "expected_item_name": "<actual plug-in name>",
      "expected_track_name": "Guitar",
      "expected_device_names": ["Amp", "Tuner"],
-     "plugin_kind": "audio_effect"
+     "plugin_kind": "audio_effect",
+     "position": 0
    }
    ```
 
 5. Save the returned `load_id`. Poll `get_device_load(load_id)` until terminal.
-   The chain must contain exactly one appended device with the original devices
-   intact, and the device must have the requested instrument/effect type, before
+   The chain must contain exactly one new device at the requested position with
+   the original device identities and order intact. The device must also have
+   the requested instrument/effect type before
    status becomes `completed` with `verified: true`. The initialization window
    is 15 seconds after Live's load call returns. This verifies topology and type;
    it does not prove licensing, audio quality, or plug-in GUI readiness.
+   The job reports the resolved `position`; verified completion reports its
+   `device` index. Both are zero-based. The same position option is available on
+   `load_audio_effect` for stock effects and presets.
 6. Re-read `get_devices` before changing parameters. `set_device_parameter` can
    control enabled parameters exposed to Live using their actual native ranges.
    Some plug-ins require configuring parameters in Live first; their own GUI
@@ -79,8 +90,8 @@ cannot remove devices or restore the previous device chain.
 
 Example request:
 
-> Inspect my tracks and browse my installed VST3s. Append one instance of the
-> named compressor to the guitar track, verify the load and inspect its exposed
+> Inspect my tracks and browse my installed VST3s. Insert AgentMeter before the
+> first effect on the guitar track, verify the load and inspect its exposed
 > parameters. Leave the settings at their defaults.
 
 Live verification on Windows with Live 11.3.43 passed on 2026-10-14: vendor-folder
@@ -92,5 +103,13 @@ and left the two plug-in instances there. This verifies insertion, not audio
 processing, internal presets, or compatibility with every installed plug-in.
 
 Mock tests additionally cover delayed initialization, timeout recovery, incompatible
-tracks, duplicate names across formats, changed chains and restoration failures.
+tracks, duplicate names across formats, changed chains, start/middle/end insertion,
+incorrect placement, MIDI/audio ordering and restoration failures.
 Real MCP stdio checks confirm discovery and missing-token errors for the new tools.
+
+Position support was also verified on Live 11.3.43 in the default test set:
+AgentMeter was inserted at slots 0 and 1, and EQ Eight at slots 0 and 2 in
+nonempty chains. Every job returned `completed`, `verified: true` and
+`view_restored: true`, with the requested `position` matching the readback `device`
+index and all existing devices retained in order. The resulting unsaved test
+chain is EQ Eight → AgentMeter → EQ Eight → AgentMeter → EQ Eight.

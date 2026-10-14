@@ -33,13 +33,27 @@ async def main():
                 "prepare_resampling_track", "start_resampling_capture", "get_resampling_capture",
                 "cancel_resampling_capture", "finish_resampling_capture", "list_resampling_captures",
                 "list_live_resampling_captures", "set_playback_start", "create_session_scene"}
+            for name in ("load_audio_effect", "load_vst3_plugin"):
+                schema = next(t.inputSchema for t in tools.tools if t.name == name)
+                assert "position" in schema["properties"], (name, "Insertion position must be discoverable")
+                assert "position" not in schema.get("required", []), (name, "Append remains the default")
+                arguments = dict(track=0, item_id="a" * 32, expected_item_name="Effect",
+                    expected_track_name="Guitar", expected_device_names=[])
+                if name == "load_vst3_plugin":
+                    arguments["plugin_kind"] = "audio_effect"
+                for position in (True, 1.5, "1"):
+                    result = await session.call_tool(name, dict(arguments, position=position))
+                    assert result.isError and any("position" in getattr(c, "text", "") for c in result.content), (
+                        name, "Noninteger positions must fail validation before reaching the bridge")
             result = await session.call_tool("get_project", {})
             assert result.isError, "Missing bridge token must produce an MCP tool error"
             for name, arguments in [
                 ("browse_plugins", {}),
                 ("list_device_loads", {}),
                 ("load_vst3_plugin", dict(track=0, item_id="a" * 32, expected_item_name="VST3 Effect",
-                    expected_track_name="Guitar", expected_device_names=[], plugin_kind="audio_effect")),
+                    expected_track_name="Guitar", expected_device_names=[], plugin_kind="audio_effect", position=0)),
+                ("load_audio_effect", dict(track=0, item_id="a" * 32, expected_item_name="EQ Eight",
+                    expected_track_name="Guitar", expected_device_names=[], position=0)),
                 ("set_playback_start", dict(start_beats=32)),
                 ("create_session_scene", dict(name="Verse")),
                 ("prepare_resampling_track", {}),

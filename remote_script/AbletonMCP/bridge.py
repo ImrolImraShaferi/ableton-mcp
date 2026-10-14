@@ -530,6 +530,11 @@ class AbletonMCP(ControlSurface):
         if (params.get("expected_track_name") != track.name or
                 params.get("expected_device_names") != [d.name for d in devices]):
             raise ValueError("Target changed; inspect tracks and devices again")
+        position = params.get("position")
+        if position is None:
+            position = len(devices)
+        if type(position) is not int or not 0 <= position <= len(devices):
+            raise ValueError("Position must be an integer from 0 through the current device count")
         handle = self._browser_items.get(params.get("item_id"))
         if handle is None or not handle["item"].is_loadable:
             raise ValueError("Unknown, expired or non-loadable browser item")
@@ -551,10 +556,19 @@ class AbletonMCP(ControlSurface):
                 if any(k != "midi_effect" for k in kinds):
                     raise ValueError("Use a MIDI track containing only MIDI effects or no devices; "
                                      "existing instruments/audio devices will not be replaced")
-            elif not track.has_audio_input and "instrument" not in kinds:
-                raise ValueError("VST3 audio effects require an audio track or a MIDI track with an instrument")
-            if song.record_mode or song.session_record:
-                raise ValueError("Stop recording before loading a VST3 plug-in")
+                if position != len(devices):
+                    raise ValueError("An instrument must be inserted after all MIDI effects")
+        else:
+            kind = "audio_effect"
+            kinds = [self._device_kind(device) for device in devices]
+        if kind == "audio_effect" and not track.has_audio_input:
+            instruments = [i for i, k in enumerate(kinds) if k == "instrument"]
+            if not instruments:
+                raise ValueError("Audio effects require an audio track or a MIDI track with an instrument")
+            if position <= instruments[-1]:
+                raise ValueError("Audio effects must be inserted after the instrument on MIDI tracks")
+        if song.record_mode or song.session_record:
+            raise ValueError("Stop recording before loading a device")
         if any(job["status"] == "pending" for job in self._device_loads.values()):
             raise ValueError("A device load is pending; check its status before loading again")
         if len(self._device_loads) >= 100:
@@ -562,17 +576,25 @@ class AbletonMCP(ControlSurface):
         browser = self.application().browser
         if browser.hotswap_target is not None:
             raise ValueError("Exit Live hot-swap mode before adding a device")
-        # Live 11 exposes selected_right/default, not an "end" enum member.
-        # Select the last top-level device explicitly, then insert to its right.
-        mode = (Live.Track.DeviceInsertMode.selected_right if devices
-                else Live.Track.DeviceInsertMode.default)
+        # Insert immediately before the selected anchor, or to the right of the
+        # last device when appending. These modes are used by Live's own Push
+        # browser; no reordering or temporary removal of existing devices.
+        anchor = None
+        mode = Live.Track.DeviceInsertMode.default
+        if devices:
+            if position < len(devices):
+                anchor = devices[position]
+                mode = Live.Track.DeviceInsertMode.selected_left
+            else:
+                anchor = devices[-1]
+                mode = Live.Track.DeviceInsertMode.selected_right
         old_mode = track.view.device_insert_mode
         old_track = song.view.selected_track
         old_device = track.view.selected_device
         load_id = uuid.uuid4().hex
         job = dict(load_id=load_id, status="pending", track=index,
                    track_name=track.name, browser_item_name=item.name, verified=False,
-                   view_restored=True)
+                   view_restored=True, position=position)
         if category == "plugins":
             job.update(plugin_format="VST3", plugin_kind=kind, browser_path=handle["path"])
         self._device_loads[load_id] = job
@@ -581,8 +603,8 @@ class AbletonMCP(ControlSurface):
             song.begin_undo_step()
             undo_started = True
             song.view.selected_track = track
-            if devices:
-                song.view.select_device(devices[-1])
+            if anchor is not None:
+                song.view.select_device(anchor)
             track.view.device_insert_mode = mode
             browser.load_item(item)
         except Exception as exc:
@@ -615,18 +637,21 @@ class AbletonMCP(ControlSurface):
         job = self._device_loads[load_id]
         try:
             current = tuple(track.devices)
+            position = job["position"]
             if (deadline is not None and self.song() == song and track in song.tracks
                     and current == before and time.monotonic() < deadline):
                 self.schedule_message(2, lambda: self._verify_device_load(
                     load_id, song, track, before, deadline))
                 return
             if (self.song() != song or track not in song.tracks or
-                    len(current) != len(before) + 1 or current[:-1] != before):
-                raise ValueError("Expected one appended device with the original chain intact")
-            device = current[-1]
+                    len(current) != len(before) + 1 or
+                    current[:position] + current[position + 1:] != before):
+                raise ValueError("Expected one inserted device at the requested position "
+                                 "with the original chain intact")
+            device = current[position]
             if "plugin_kind" in job and self._device_kind(device) != job["plugin_kind"]:
                 raise ValueError("Loaded device type differs from requested plugin_kind")
-            job.update(status="completed", verified=True, device=len(before),
+            job.update(status="completed", verified=True, device=position,
                        device_name=device.name, class_name=device.class_name)
         except Exception as exc:
             job.update(status="unverified", error=str(exc) +
